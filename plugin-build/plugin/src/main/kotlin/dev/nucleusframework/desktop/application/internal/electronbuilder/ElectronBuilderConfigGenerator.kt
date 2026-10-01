@@ -79,8 +79,18 @@ internal class ElectronBuilderConfigGenerator {
         // On macOS the product name must equal the prepackaged bundle's directory name: the DMG
         // target stages the app as `${productFilename}.app` while the ZIP target archives the
         // directory verbatim, so any mismatch ships two differently named bundles for one release.
+        //
+        // On Linux, fpm-based targets (deb/rpm/pacman) install the payload under
+        // `/opt/${sanitizedProductName}` and electron-builder's sanitizer only strips
+        // filesystem-invalid characters and does not remove spaces. So a display-style appName
+        // bakes spaces into the path, which then breaks every unquoted
+        // path/ExecStart substitution done by afterInstall scripts and systemd unit templates.
+        // `executableName` is already resolved from `linux.packageName ?: packageName`  and is
+        // the filesystem-safe name so it should be preferred it over appName on Linux so the install directory
+        // matched what scripts would expect.
         val resolvedProductName =
             macBundleName?.takeIf { currentOS == OS.MacOS && it.isNotBlank() }
+                ?: (if (currentOS == OS.Linux) executableName else null)
                 ?: distributions.appName ?: distributions.packageName ?: executableName
                 ?: error(
                     "No appName, packageName, or executableName available for electron-builder config",
@@ -277,7 +287,8 @@ internal class ElectronBuilderConfigGenerator {
         val height: Int,
     )
 
-    private fun generateWindowsConfig(
+    // internal (like generateLinuxConfig) so the rendered YAML can be asserted in unit tests
+    internal fun generateWindowsConfig(
         yaml: StringBuilder,
         distributions: JvmApplicationDistributions,
         targetFormat: TargetFormat,
@@ -305,19 +316,40 @@ internal class ElectronBuilderConfigGenerator {
         when (targetFormat) {
             TargetFormat.Nsis, TargetFormat.Exe -> {
                 yaml.appendLine("nsis:")
-                generateNsisSettings(yaml, distributions.windows.nsis, "  ", nsisProtocolInclude)
+                generateNsisSettings(
+                    yaml,
+                    distributions.windows.nsis,
+                    "  ",
+                    nsisProtocolInclude,
+                    menuCategoryDefault = distributions.windows.menuGroup,
+                )
             }
             TargetFormat.NsisWeb -> {
                 yaml.appendLine("nsisWeb:")
-                generateNsisSettings(yaml, distributions.windows.nsis, "  ", nsisProtocolInclude)
+                generateNsisSettings(
+                    yaml,
+                    distributions.windows.nsis,
+                    "  ",
+                    nsisProtocolInclude,
+                    menuCategoryDefault = distributions.windows.menuGroup,
+                )
             }
             TargetFormat.Msi -> {
+                val msi = distributions.windows.msi
                 yaml.appendLine("msi:")
                 appendIfNotNull(yaml, "  upgradeCode", distributions.windows.upgradeUuid)
                 @Suppress("DEPRECATION")
-                val perMachine = distributions.windows.msi.explicitPerMachine
+                val perMachine = msi.explicitPerMachine
                     ?: !distributions.windows.perUserInstall
                 yaml.appendLine("  perMachine: $perMachine")
+                yaml.appendLine("  oneClick: ${msi.oneClick}")
+                yaml.appendLine("  runAfterFinish: ${msi.runAfterFinish}")
+                yaml.appendLine("  createDesktopShortcut: ${msi.createDesktopShortcut}")
+                yaml.appendLine("  createStartMenuShortcut: ${msi.createStartMenuShortcut}")
+                // windows.menuGroup is the jpackage-era name for the same concept, so it acts as
+                // the default here; without it the shortcut lands in the start menu root.
+                appendIfNotNull(yaml, "  menuCategory", msi.menuCategory ?: distributions.windows.menuGroup)
+                appendIfNotNull(yaml, "  shortcutName", msi.shortcutName)
             }
             TargetFormat.AppX -> generateAppXConfig(yaml, distributions.windows.appx)
             TargetFormat.Portable -> {
@@ -421,6 +453,7 @@ internal class ElectronBuilderConfigGenerator {
         nsis: NsisSettings,
         indent: String,
         protocolInclude: File? = null,
+        menuCategoryDefault: String? = null,
     ) {
         yaml.appendLine("${indent}oneClick: ${nsis.oneClick}")
         yaml.appendLine("${indent}allowElevation: ${nsis.allowElevation}")
@@ -429,6 +462,10 @@ internal class ElectronBuilderConfigGenerator {
         yaml.appendLine("${indent}createDesktopShortcut: ${nsis.createDesktopShortcut}")
         yaml.appendLine("${indent}createStartMenuShortcut: ${nsis.createStartMenuShortcut}")
         yaml.appendLine("${indent}runAfterFinish: ${nsis.runAfterFinish}")
+        // windows.menuGroup is the jpackage-era name for the same concept, so it acts as
+        // the default here; without it the shortcut lands in the start menu root.
+        appendIfNotNull(yaml, "${indent}menuCategory", nsis.menuCategory ?: menuCategoryDefault)
+        appendIfNotNull(yaml, "${indent}shortcutName", nsis.shortcutName)
         yaml.appendLine("${indent}deleteAppDataOnUninstall: ${nsis.deleteAppDataOnUninstall}")
         yaml.appendLine("${indent}warningsAsErrors: false")
 
@@ -580,6 +617,7 @@ internal class ElectronBuilderConfigGenerator {
                 }
                 appendIfNotNull(yaml, "  afterInstall", linuxAfterInstallTemplate?.absolutePath)
                 appendIfNotNull(yaml, "  afterRemove", linuxAfterRemoveTemplate?.absolutePath)
+                appendFpmArgs(yaml, fpmArgs(distributions, rpmAutoAddDirectories = false))
             }
             TargetFormat.Rpm -> {
                 yaml.appendLine("rpm:")
@@ -599,8 +637,7 @@ internal class ElectronBuilderConfigGenerator {
                 // --rpm-auto-add-directories makes fpm own every payload directory (while still
                 // excluding the standard filesystem-package dirs), mirroring what jpackage's own
                 // template.spec does via `comm -23` against the filesystem package. See issue #251.
-                yaml.appendLine("  fpm:")
-                yaml.appendLine("    - \"--rpm-auto-add-directories\"")
+                appendFpmArgs(yaml, fpmArgs(distributions, rpmAutoAddDirectories = true))
             }
             TargetFormat.Pacman -> {
                 yaml.appendLine("pacman:")
@@ -612,6 +649,7 @@ internal class ElectronBuilderConfigGenerator {
                 }
                 appendIfNotNull(yaml, "  afterInstall", linuxAfterInstallTemplate?.absolutePath)
                 appendIfNotNull(yaml, "  afterRemove", linuxAfterRemoveTemplate?.absolutePath)
+                appendFpmArgs(yaml, fpmArgs(distributions, rpmAutoAddDirectories = false))
             }
             TargetFormat.Snap -> generateSnapConfig(yaml, distributions.linux.snap)
             TargetFormat.Flatpak -> generateFlatpakConfig(yaml, distributions.linux.flatpak)
@@ -765,6 +803,56 @@ internal class ElectronBuilderConfigGenerator {
      */
     @Suppress("UnusedParameter", "FunctionOnlyReturningConstant")
     private fun resolveInstallerIdentity(macOS: JvmMacOSPlatformSettings): String? = null
+
+    private fun fpmArgs(
+        distributions: JvmApplicationDistributions,
+        rpmAutoAddDirectories: Boolean,
+    ): List<String> {
+        val args = mutableListOf<String>()
+        if (rpmAutoAddDirectories) {
+            args += "--rpm-auto-add-directories"
+        }
+        distributions.linux.beforeInstall.orNull
+            ?.asFile
+            ?.takeIf { it.isFile }
+            ?.let {
+                args += "--before-install"
+                args += it.absolutePath
+            }
+        distributions.linux.beforeRemove.orNull
+            ?.asFile
+            ?.takeIf { it.isFile }
+            ?.let {
+                args += "--before-remove"
+                args += it.absolutePath
+            }
+        distributions.linux.afterUpgrade.orNull
+            ?.asFile
+            ?.takeIf { it.isFile }
+            ?.let {
+                args += "--after-upgrade"
+                args += it.absolutePath
+            }
+        distributions.linux.beforeUpgrade.orNull
+            ?.asFile
+            ?.takeIf { it.isFile }
+            ?.let {
+                args += "--before-upgrade"
+                args += it.absolutePath
+            }
+        return args
+    }
+
+    private fun appendFpmArgs(
+        yaml: StringBuilder,
+        args: List<String>,
+    ) {
+        if (args.isEmpty()) return
+        yaml.appendLine("  fpm:")
+        for (arg in args) {
+            yaml.appendLine("    - \"${arg.escapeForYamlDoubleQuotes()}\"")
+        }
+    }
 
     private fun appendIfNotNull(
         yaml: StringBuilder,

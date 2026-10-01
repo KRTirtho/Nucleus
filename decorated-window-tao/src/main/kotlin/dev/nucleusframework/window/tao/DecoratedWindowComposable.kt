@@ -1,15 +1,23 @@
-@file:Suppress("MagicNumber")
+// #636: the window/dialog openers below are `@ComposableOpenTarget(-1)` with a
+// `@UiComposable` content lambda — callable from any applier, always composing
+// UI — so a non-UI composable called in the caller's scope cannot reclassify
+// the window content. ktlint's `annotation` and `function-type-modifier-spacing`
+// rules contradict each other on the resulting two-annotation parameter type.
+@file:Suppress("MagicNumber", "ktlint:standard:annotation")
 
 package dev.nucleusframework.window.tao
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ComposableOpenTarget
 import androidx.compose.runtime.CompositionLocalContext
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.UiComposable
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.KeyEvent
@@ -18,6 +26,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.WindowState
@@ -28,6 +37,8 @@ import dev.nucleusframework.window.tao.ffi.NativeTaoBridge
 import dev.nucleusframework.window.tao.ffi.NativeTaoMacOsDecoBridge
 import dev.nucleusframework.window.tao.ffi.NativeTaoWindowsDecoBridge
 import dev.nucleusframework.window.tao.ffi.toRgbaIcon
+import kotlinx.coroutines.delay
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
@@ -51,7 +62,9 @@ import kotlin.math.roundToInt
  *    propagates via snapshot but does not share a CompositionContext.
  */
 @Suppress("LongParameterList", "FunctionNaming", "LongMethod", "CyclomaticComplexMethod")
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
+@ComposableOpenTarget(-1)
 public fun ApplicationScope.DecoratedWindow(
     onCloseRequest: () -> Unit,
     state: WindowState = rememberWindowState(),
@@ -128,7 +141,58 @@ public fun ApplicationScope.DecoratedWindow(
     // the first composition (see [openDecoratedWindow]). Defaults to null for
     // top-level windows; [DecoratedDialog] forwards its parent's locals here.
     compositionLocalContext: CompositionLocalContext? = null,
-    content: @Composable TaoDecoratedWindowScope.() -> Unit,
+    /**
+     * Click-through window: every pointer event falls through to whatever
+     * sits below (`WS_EX_TRANSPARENT | WS_EX_LAYERED` on Windows,
+     * `NSWindow.ignoresMouseEvents` on macOS, an empty GDK input region on
+     * Linux). Reactive — can be toggled at runtime. Pair with
+     * `focusable = false` for passive overlays (watermarks, HUDs) that must
+     * never intercept input.
+     */
+    clickThrough: Boolean = false,
+    /**
+     * Show the window on every desktop rather than only the one it was created
+     * on (macOS Spaces, Linux workspaces, Windows virtual desktops). Reactive.
+     *
+     * macOS `NSWindowCollectionBehaviorCanJoinAllSpaces` / Linux
+     * `gtk_window_stick()` (X11 and XWayland only — native Wayland has no
+     * workspace protocol and logs a warning); no-op on Windows, where a
+     * [hiddenFromDock] window is already visible on all desktops
+     * (`WS_EX_TOOLWINDOW` windows are not
+     * tracked by the Virtual Desktop Manager). Without it a macOS overlay
+     * disappears as soon as the user switches Space.
+     *
+     * See [TaoWindow.setVisibleOnAllWorkspaces] for the full-screen Space
+     * caveat.
+     */
+    visibleOnAllWorkspaces: Boolean = false,
+    /**
+     * Linux only: give this window an X11 surface even when the app runs on a
+     * native Wayland session, by re-homing it on a second `GdkDisplay` opened
+     * on `DISPLAY` (XWayland). Creation-time only.
+     *
+     * Wayland deliberately has no protocol for client-side stacking
+     * ([alwaysOnTop]), programmatic positioning ([state]`.position`) or
+     * workspace stickiness ([visibleOnAllWorkspaces]), so an overlay that needs
+     * them can take an X11 surface for itself while the rest of the app keeps
+     * its Wayland surfaces — no `NUCLEUS_TAO_LINUX_RENDERER=x11` for the whole
+     * process. Logs a warning when no X server is reachable and the window
+     * stays on Wayland.
+     */
+    forceX11: Boolean = false,
+    /**
+     * Pin the window below every other window instead of above them — Windows
+     * `HWND_BOTTOM`, macOS `NSWindowLevel.BelowNormal`, Linux
+     * `gtk_window_set_keep_below` (X11/XWayland only; same Wayland caveat as
+     * [alwaysOnTop]). Reactive.
+     *
+     * For wallpaper-level overlays — a desktop widget, a watermark that must
+     * never cover the window in front of it. Mutually exclusive with
+     * [alwaysOnTop]; see [TaoWindow.setAlwaysOnBottom] for what below-stacking
+     * does *not* give you (it is not `_NET_WM_WINDOW_TYPE_DESKTOP`).
+     */
+    alwaysOnBottom: Boolean = false,
+    content: @Composable @UiComposable TaoDecoratedWindowScope.() -> Unit,
 ) {
     val latestOnClose by rememberUpdatedState(onCloseRequest)
     val latestPreview by rememberUpdatedState(onPreviewKeyEvent)
@@ -141,8 +205,21 @@ public fun ApplicationScope.DecoratedWindow(
                 .toArgb(),
         )
 
+    // Read here, in the parent composition, exactly like Compose Desktop's
+    // `SwingWindow`: the resulting handler is stored as a plain field on the
+    // scene host, so it still applies when the window's own composition is the
+    // thing that failed.
+    val windowExceptionHandlerFactory = LocalWindowExceptionHandlerFactory.current
+
     state.inflateToMinimumSize(minimumSize)
     state.applyMacOsInitialMaximizedSize()
+
+    // Compose Desktop wrap-content: an unspecified axis is measured from
+    // content and applied via setInnerSize (#532). Creating the native
+    // surface at NaN/0 makes Metal/EGL drop the drawable.
+    val wrapWidth = !state.size.width.isSpecified
+    val wrapHeight = !state.size.height.isSpecified
+    val measuredContent = remember { mutableStateOf<IntSize?>(null) }
 
     // Mirrors Compose Desktop's `appliedState` pattern: tracks the last value
     // we wrote to the window so the native→state listeners can ignore echoes.
@@ -153,6 +230,10 @@ public fun ApplicationScope.DecoratedWindow(
                 var position: WindowPosition? = null
                 var placement: WindowPlacement? = null
                 var isMinimized: Boolean? = null
+                var wrapSettled: Boolean = !wrapWidth && !wrapHeight
+
+                /** Physical px of the last programmatic [TaoWindow.setInnerSize]; null = user/OS resize. */
+                var pendingProgrammaticPx: IntSize? = null
             }
         }
 
@@ -171,18 +252,20 @@ public fun ApplicationScope.DecoratedWindow(
                     onCloseRequest = { latestOnClose() },
                     title = title,
                     icon = icon,
-                    width =
-                        state.size.width.value
-                            .toDouble(),
-                    height =
-                        state.size.height.value
-                            .toDouble(),
+                    width = state.size.width.toWindowCreationDp(DEFAULT_WINDOW_WIDTH_DP),
+                    height = state.size.height.toWindowCreationDp(DEFAULT_WINDOW_HEIGHT_DP),
                     minimumSize = minimumSize,
                     visible = false,
                     resizable = resizable,
                     enabled = enabled,
                     focusable = focusable,
-                    alwaysOnTop = false,
+                    // The real initial value, not a hardcoded false (#631): the
+                    // reactive LaunchedEffect below only runs once the event
+                    // loop resumes, so an overlay created with the flag set
+                    // would otherwise show non-topmost first — and on Windows
+                    // the late async flag flip can lose the race against the
+                    // creation-time style rewrites (acrylic, skip-taskbar).
+                    alwaysOnTop = alwaysOnTop,
                     // Apply Maximized at builder time. Fullscreen still needs
                     // a post-creation toggle because tao's `WindowBuilder` does
                     // not expose `with_fullscreen` in the same way (it takes a
@@ -198,6 +281,8 @@ public fun ApplicationScope.DecoratedWindow(
                     macOSStyle = macOSStyle,
                     hiddenFromDock = hiddenFromDock,
                     initialCompositionLocalContext = compositionLocalContext,
+                    forceX11 = forceX11,
+                    exceptionHandlerFactory = windowExceptionHandlerFactory,
                     content = {
                         val backgroundArgb = latestWindowBackgroundArgb.value
                         val clearColorLayers = LocalWindowClearColorLayers.current
@@ -213,6 +298,16 @@ public fun ApplicationScope.DecoratedWindow(
                         latestContent.invoke(this)
                     },
                 )
+
+            w.installSizePolicy(
+                WindowSizePolicy(
+                    wrapWidth = wrapWidth,
+                    wrapHeight = wrapHeight,
+                    onContentMeasured = { size ->
+                        if (measuredContent.value != size) measuredContent.value = size
+                    },
+                ),
+            )
 
             // Initial placement / minimised flag are applied imperatively here
             // (Maximized is handled at builder time, above).
@@ -235,9 +330,31 @@ public fun ApplicationScope.DecoratedWindow(
                 if (wPx <= 0 || hPx <= 0) return@onResized
                 val scale = (NativeTaoBridge.nativeScaleFactor(w.handle).coerceAtLeast(1)) / 1000f
                 val newSize = DpSize((wPx / scale).dp, (hPx / scale).dp)
-                if (newSize != applied.size) {
-                    applied.size = newSize
-                    latestState.size = newSize
+                val pending = applied.pendingProgrammaticPx
+                val programmaticEcho =
+                    pending != null &&
+                        abs(wPx - pending.width) <= PROGRAMMATIC_SIZE_ECHO_PX &&
+                        abs(hPx - pending.height) <= PROGRAMMATIC_SIZE_ECHO_PX
+                // In-flight programmatic resize: a stale WM_SIZE from the
+                // previous request must not write WindowState.size backwards
+                // and fight animateDpAsState (#576).
+                if (pending == null || programmaticEcho) {
+                    if (programmaticEcho) {
+                        applied.pendingProgrammaticPx = null
+                    }
+                    if (newSize != applied.size) {
+                        applied.size = newSize
+                        // Keep Unspecified in WindowState until wrap-content
+                        // measurement writes the real size; otherwise the first
+                        // native configure (creation fallback) would freeze the
+                        // requested wrap axis at 600dp.
+                        // Programmatic echoes must not overwrite the size the
+                        // animation/composition just wrote — dp↔px rounding
+                        // would otherwise ping-pong setInnerSize.
+                        if (applied.wrapSettled && !programmaticEcho) {
+                            latestState.size = newSize
+                        }
+                    }
                 }
                 // Tao doesn't emit a dedicated "placement changed" event, but
                 // every fullscreen / maximize / restore transition resizes the
@@ -251,6 +368,9 @@ public fun ApplicationScope.DecoratedWindow(
                         else -> WindowPlacement.Floating
                     }
                 if (placementNow != applied.placement) {
+                    if (placementNow != WindowPlacement.Floating) {
+                        applied.pendingProgrammaticPx = null
+                    }
                     applied.placement = placementNow
                     latestState.placement = placementNow
                 }
@@ -276,7 +396,10 @@ public fun ApplicationScope.DecoratedWindow(
         }
 
     DisposableEffect(window) {
-        onDispose { window.requestClose() }
+        onDispose {
+            window.clearSizePolicy()
+            window.requestClose()
+        }
     }
 
     // ── State → window sync ──
@@ -287,6 +410,32 @@ public fun ApplicationScope.DecoratedWindow(
             window.setResizable(resizable)
         }
     }
+    LaunchedEffect(window, measuredContent.value) {
+        if (applied.wrapSettled) return@LaunchedEffect
+        val measured = measuredContent.value ?: return@LaunchedEffect
+        val scale = (NativeTaoBridge.nativeScaleFactor(window.handle).coerceAtLeast(1)) / 1000f
+        val resolved =
+            resolveWrapContentSize(
+                wrapWidth = wrapWidth,
+                wrapHeight = wrapHeight,
+                requested = latestState.size,
+                minimumSize = minimumSize,
+                measured = measured,
+                scale = scale,
+            ) ?: return@LaunchedEffect
+        applied.pendingProgrammaticPx =
+            IntSize(
+                (resolved.width.value * scale).roundToInt(),
+                (resolved.height.value * scale).roundToInt(),
+            )
+        window.setInnerSize(
+            resolved.width.value.toDouble(),
+            resolved.height.value.toDouble(),
+        )
+        applied.size = resolved
+        latestState.size = resolved
+        applied.wrapSettled = true
+    }
     LaunchedEffect(window, state.size, state.placement) {
         // Maximized / Fullscreen windows derive their size from the
         // OS-managed placement, not from `state.size`. Skip the
@@ -294,7 +443,14 @@ public fun ApplicationScope.DecoratedWindow(
         // requested logical size while Win32/Wayland think it should
         // fill the monitor.
         if (state.placement != WindowPlacement.Floating) return@LaunchedEffect
+        if (!state.size.width.isSpecified || !state.size.height.isSpecified) return@LaunchedEffect
         if (state.size != applied.size) {
+            val scale = (NativeTaoBridge.nativeScaleFactor(window.handle).coerceAtLeast(1)) / 1000f
+            applied.pendingProgrammaticPx =
+                IntSize(
+                    (state.size.width.value * scale).roundToInt(),
+                    (state.size.height.value * scale).roundToInt(),
+                )
             window.setInnerSize(
                 state.size.width.value
                     .toDouble(),
@@ -331,7 +487,21 @@ public fun ApplicationScope.DecoratedWindow(
                 // `state.size` still holds the (smaller) requested size at this
                 // point.
                 val effectiveSize = effectiveAlignedSize(state.size, minimumSize)
-                if (applyAlignedPosition(window, pos, effectiveSize)) {
+                // Resolving an alignment needs the monitor work area, which
+                // Linux queries through the native window — and Tao creates
+                // that asynchronously on its event loop. A JVM start is slow
+                // enough that it is already there at first composition; a
+                // native-image start is not, and a single failed attempt left
+                // the window wherever the WM had centred it, for good, since
+                // this effect only re-runs when `state.position` changes.
+                var landed = applyAlignedPosition(window, pos, effectiveSize)
+                var attempt = 0
+                while (!landed && attempt < ALIGNED_POSITION_RETRIES) {
+                    delay(ALIGNED_POSITION_RETRY_MS)
+                    attempt++
+                    landed = applyAlignedPosition(window, pos, effectiveSize)
+                }
+                if (landed) {
                     applied.position = pos
                 }
             }
@@ -367,7 +537,12 @@ public fun ApplicationScope.DecoratedWindow(
     // ── Other reactive params ──
     LaunchedEffect(window, title) { window.setTitle(title) }
     LaunchedEffect(window, alwaysOnTop) { window.setAlwaysOnTop(alwaysOnTop) }
+    LaunchedEffect(window, alwaysOnBottom) { window.setAlwaysOnBottom(alwaysOnBottom) }
     LaunchedEffect(window, focusable) { window.setFocusable(focusable) }
+    LaunchedEffect(window, clickThrough) { window.setIgnoreCursorEvents(clickThrough) }
+    LaunchedEffect(window, visibleOnAllWorkspaces) {
+        window.setVisibleOnAllWorkspaces(visibleOnAllWorkspaces)
+    }
     LaunchedEffect(window, visible) {
         if (visible) {
             window.show()
@@ -441,6 +616,18 @@ private fun WindowState.applyMacOsInitialMaximizedSize() {
         }
     }
 }
+
+/**
+ * How long [applyAlignedPosition] keeps retrying while the native window is
+ * still being created on the Tao event loop — ~10 frames at 60 Hz, far past
+ * any observed startup, and given up on rather than looped forever so a
+ * genuinely unavailable monitor query cannot wedge the effect.
+ */
+private const val ALIGNED_POSITION_RETRIES = 10
+private const val ALIGNED_POSITION_RETRY_MS = 16L
+
+/** Native px slop when matching a programmatic setInnerSize echo (#576). */
+private const val PROGRAMMATIC_SIZE_ECHO_PX = 1
 
 /**
  * Resolves a [WindowPosition.Aligned] against the primary monitor's work area

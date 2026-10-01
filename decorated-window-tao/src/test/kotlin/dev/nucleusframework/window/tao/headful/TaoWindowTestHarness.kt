@@ -1,6 +1,9 @@
 package dev.nucleusframework.window.tao.headful
 
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.window.WindowState
+import dev.nucleusframework.window.tao.TaoDecoratedDialogScope
 import dev.nucleusframework.window.tao.TaoDecoratedWindowScope
 import dev.nucleusframework.window.tao.TaoWindow
 import kotlinx.coroutines.delay
@@ -42,6 +45,28 @@ internal class TaoWindowTestCase(
      * window instead of being drawn inline. Creation-time only.
      */
     val nativePopupLayers: Boolean = false,
+    /**
+     * Initial [androidx.compose.ui.window.WindowState.size] for this case's
+     * [dev.nucleusframework.window.tao.DecoratedWindow]. `null` keeps the
+     * Compose Desktop default (800×600). Pass a [DpSize] with
+     * [androidx.compose.ui.unit.Dp.Unspecified] on one or both axes to
+     * exercise wrap-content sizing (#532).
+     */
+    val size: DpSize? = null,
+    /**
+     * When non-null, the suite uses this [WindowState] instead of a fresh
+     * [androidx.compose.ui.window.rememberWindowState]. Lets a case animate
+     * or otherwise mutate size the same way an app drives
+     * `DecoratedWindow(state)` (#576).
+     */
+    val windowState: WindowState? = null,
+    /**
+     * When non-null, the suite also composes a [dev.nucleusframework.window.tao.DecoratedDialog]
+     * at application scope (parented to this case's window). [dialogSize]
+     * is its [androidx.compose.ui.window.DialogState.size].
+     */
+    val dialogSize: DpSize? = null,
+    val dialogContent: (@Composable TaoDecoratedDialogScope.() -> Unit)? = null,
     /** Optional extra window content composed inside the DecoratedWindow. */
     val content: @Composable TaoDecoratedWindowScope.() -> Unit = {},
     val driver: suspend TaoWindowTestScope.() -> Unit,
@@ -53,6 +78,7 @@ internal class TaoWindowTestCase(
 
 internal class TaoWindowTestScope(
     val window: TaoWindow,
+    val dialogWindow: TaoWindow? = null,
 ) {
     /**
      * Polls [predicate] on the composition dispatcher (the Tao main thread)
@@ -68,6 +94,23 @@ internal class TaoWindowTestScope(
             check(System.currentTimeMillis() < deadline) { "timed out waiting for: $description" }
             delay(POLL_MILLIS)
         }
+    }
+
+    /**
+     * [awaitUntil] that reports instead of throwing: `true` once [predicate]
+     * held within [timeoutMillis], `false` otherwise — for cases whose real
+     * assertion (with its own diagnostics) follows.
+     */
+    suspend fun awaitUntilOrTimeout(
+        timeoutMillis: Long,
+        predicate: () -> Boolean,
+    ): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMillis
+        while (!predicate()) {
+            if (System.currentTimeMillis() >= deadline) return false
+            delay(POLL_MILLIS)
+        }
+        return true
     }
 
     /** Lets the loop breathe for a fixed settle period. */

@@ -9,14 +9,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.InternalComposeUiApi
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asComposeCanvas
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.pointer.PointerButton
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerType
-import androidx.compose.ui.platform.PlatformContext
-import androidx.compose.ui.scene.CanvasLayersComposeScene
 import androidx.compose.ui.scene.ComposeScene
 import androidx.compose.ui.scene.ComposeSceneLayer
 import androidx.compose.ui.unit.Density
@@ -27,7 +24,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import dev.nucleusframework.window.tao.TaoApplication
 import dev.nucleusframework.window.tao.TaoMouseButton
 import dev.nucleusframework.window.tao.TaoWindow
-import dev.nucleusframework.window.tao.event.TaoSyntheticMouseWheelEvent
+import dev.nucleusframework.window.tao.event.dispatchAwtShapedScroll
 import dev.nucleusframework.window.tao.event.taoKeyboardModifiers
 import dev.nucleusframework.window.tao.event.toTaoCursorIconCode
 import dev.nucleusframework.window.tao.ffi.NativeTaoBridge
@@ -35,7 +32,11 @@ import dev.nucleusframework.window.tao.ffi.NativeTaoEglBridge
 import dev.nucleusframework.window.tao.releaseGlTextureImports
 import dev.nucleusframework.window.tao.scene.LocalTaoGlTextureHost
 import dev.nucleusframework.window.tao.scene.TaoGlTextureHost
+import dev.nucleusframework.window.tao.scene.TaoPlatformContextBase
+import dev.nucleusframework.window.tao.scene.TaoSceneBundle
 import dev.nucleusframework.window.tao.scene.alignToBufferScale
+import dev.nucleusframework.window.tao.scene.canvasLayersSceneBundle
+import dev.nucleusframework.window.tao.scene.catchExceptions
 import dev.nucleusframework.window.tao.scene.preservingEglBinding
 import dev.nucleusframework.window.tao.scene.renderGlFrame
 import dev.nucleusframework.window.tao.scene.withEglContextCurrent
@@ -79,14 +80,14 @@ import kotlin.math.roundToInt
  *
  * Threading: every method must run on the Tao event-loop thread.
  */
-@OptIn(InternalComposeUiApi::class)
+@OptIn(InternalComposeUiApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Suppress("TooManyFunctions")
 internal class TaoPopupSceneLayerLinux(
     private val host: TaoPopupHostLinux,
     initialDensity: Density,
     initialLayoutDirection: LayoutDirection,
     initialFocusable: Boolean,
-    @Suppress("UNUSED_PARAMETER") parentCompositionContext: CompositionContext,
+    initialConsumePointerInputOutside: Boolean,
 ) : ComposeSceneLayer {
     private var _density = initialDensity
     private var _layoutDirection = initialLayoutDirection
@@ -172,16 +173,24 @@ internal class TaoPopupSceneLayerLinux(
             override val containerSize: IntSize get() = sceneLayoutSize
         }
 
-    private val innerScene: ComposeScene =
-        CanvasLayersComposeScene(
+    private val sceneBundle: TaoSceneBundle =
+        canvasLayersSceneBundle(
+            coroutineContext = host.sceneCoroutineContext,
             density = _density,
             layoutDirection = _layoutDirection,
             size = sceneLayoutSize,
-            coroutineContext = host.sceneCoroutineContext,
             platformContext =
-                object : PlatformContext.Empty() {
+                object : TaoPlatformContextBase() {
+                    override val sceneScale: Float get() = _density.density
+
                     override val windowInfo: androidx.compose.ui.platform.WindowInfo
                         get() = popupWindowInfo
+
+                    // The popup window's surface is per-pixel transparent, so
+                    // dialog scrims must use the alpha-aware blend — same
+                    // contract as Compose Desktop's `WindowComposeSceneLayer`
+                    // (#559).
+                    override val isWindowTransparent: Boolean get() = true
 
                     override fun setPointerIcon(pointerIcon: PointerIcon) {
                         if (released) return
@@ -191,8 +200,13 @@ internal class TaoPopupSceneLayerLinux(
                         )
                     }
                 },
-            invalidate = { host.requestRedraw() },
-        )
+            requestFrame = { host.requestRedraw() },
+        ).apply {
+            // Report through the owner window's channel — see [TaoPopupHost.exceptionHandler].
+            exceptionHandler = host.exceptionHandler
+        }
+
+    private val innerScene: ComposeScene get() = sceneBundle.scene
 
     private var onPreviewKeyEvent: ((KeyEvent) -> Boolean)? = null
     private var onKeyEvent: ((KeyEvent) -> Boolean)? = null
@@ -317,6 +331,11 @@ internal class TaoPopupSceneLayerLinux(
             _focusable = value
         }
 
+    // Stored for the ComposeSceneLayer contract; outside-press dismissal is
+    // handled via the parent scene's forwarded press listener, so this flag is
+    // not consulted on the render path.
+    override var consumePointerInputOutside: Boolean = initialConsumePointerInputOutside
+
     override fun close() {
         if (released) return
         released = true
@@ -327,7 +346,7 @@ internal class TaoPopupSceneLayerLinux(
         // Drop the TextureView handle before the context it points at dies: a
         // late composition must not import onto a closed context.
         glTextureHostState.value = null
-        innerScene.close()
+        sceneBundle.close()
         if (attachment != 0L) {
             // A layer closes when Compose drops it — from the owner's
             // composition, i.e. inside the window scene's render pass. Binding
@@ -352,7 +371,10 @@ internal class TaoPopupSceneLayerLinux(
         popupWindow.requestClose()
     }
 
-    override fun setContent(content: @Composable () -> Unit) {
+    override fun setContent(
+        @Suppress("UNUSED_PARAMETER") parentCompositionContext: CompositionContext,
+        content: @Composable () -> Unit,
+    ) {
         innerScene.setContent {
             val locals = _compositionLocalContext
             // Our texture host goes *inside* the replayed locals: those carry
@@ -465,7 +487,7 @@ internal class TaoPopupSceneLayerLinux(
             canvas.save()
             try {
                 canvas.translate(-frame.left.toFloat(), -frame.top.toFloat())
-                innerScene.render(canvas.asComposeCanvas(), nanoTime)
+                sceneBundle.render(canvas, nanoTime)
             } finally {
                 canvas.restore()
             }
@@ -475,6 +497,8 @@ internal class TaoPopupSceneLayerLinux(
 
     // ── Input — the popup window receives its own pointer events ──────────
 
+    // Guarded: these are Tao popup-window callbacks into this popup's own
+    // scene, not nested inside the owner window's guarded frame pass.
     private fun registerInput() {
         popupWindow.onPointerMoved { xFixed, yFixed ->
             sendPointer(PointerEventType.Move, xFixed / POSITION_SCALE, yFixed / POSITION_SCALE, null)
@@ -488,22 +512,16 @@ internal class TaoPopupSceneLayerLinux(
             )
         }
         popupWindow.onPointerScroll { event ->
-            if (released) return@onPointerScroll
-            val modifiers = taoKeyboardModifiers(host.parentWindow.modifierState)
-            innerScene.sendPointerEvent(
-                eventType = PointerEventType.Scroll,
-                position = scenePosition(lastX, lastY),
-                scrollDelta = Offset(event.dxAwt, event.dyAwt),
-                type = PointerType.Mouse,
-                keyboardModifiers = modifiers,
-                nativeEvent =
-                    TaoSyntheticMouseWheelEvent.create(
-                        event = event,
-                        x = lastX,
-                        y = lastY,
-                        keyboardModifiers = modifiers,
-                    ),
-            )
+            host.exceptionHandler.catchExceptions {
+                if (released) return@catchExceptions
+                val pos = scenePosition(lastX, lastY)
+                innerScene.dispatchAwtShapedScroll(
+                    x = pos.x,
+                    y = pos.y,
+                    event = event,
+                    keyboardModifiers = taoKeyboardModifiers(host.parentWindow.modifierState),
+                )
+            }
         }
     }
 
@@ -515,8 +533,8 @@ internal class TaoPopupSceneLayerLinux(
         xPx: Float,
         yPx: Float,
         button: PointerButton?,
-    ) {
-        if (released) return
+    ) = host.exceptionHandler.catchExceptions {
+        if (released) return@catchExceptions
         lastX = xPx
         lastY = yPx
         innerScene.sendPointerEvent(

@@ -83,7 +83,9 @@ import kotlin.io.path.isRegularFile
  *   1. Resolve the platform-specific app directory from the jpackage app-image output.
  *   2. Update the executable type in the app image's .cfg launcher file.
  *   3. Generate an electron-builder YAML configuration from the DSL settings.
- *   4. Invoke electron-builder via npx with `--prepackaged`.
+ *   4. Provision the pinned electron-builder toolchain (`npm ci --ignore-scripts` against the lock
+ *      file embedded in this plugin) and invoke its CLI with `--prepackaged` — see
+ *      [dev.nucleusframework.desktop.application.internal.electronbuilder.ElectronBuilderToolManager].
  *   5. Output the final installer/package to [destinationDir].
  */
 @DisableCachingByDefault(because = "Depends on external electron-builder tool")
@@ -159,6 +161,26 @@ abstract class AbstractElectronBuilderPackageTask
         @get:Optional
         @get:PathSensitive(PathSensitivity.ABSOLUTE)
         val windowsIconFile: RegularFileProperty = objects.fileProperty()
+
+        @get:InputFile
+        @get:Optional
+        @get:PathSensitive(PathSensitivity.RELATIVE)
+        val linuxAfterInstall: RegularFileProperty = objects.fileProperty()
+
+        @get:InputFile
+        @get:Optional
+        @get:PathSensitive(PathSensitivity.RELATIVE)
+        val linuxAfterRemove: RegularFileProperty = objects.fileProperty()
+
+        @get:InputFile
+        @get:Optional
+        @get:PathSensitive(PathSensitivity.RELATIVE)
+        val linuxBeforeInstall: RegularFileProperty = objects.fileProperty()
+
+        @get:InputFile
+        @get:Optional
+        @get:PathSensitive(PathSensitivity.RELATIVE)
+        val linuxBeforeRemove: RegularFileProperty = objects.fileProperty()
 
         @get:InputFile
         @get:Optional
@@ -255,8 +277,9 @@ abstract class AbstractElectronBuilderPackageTask
             updateExecutableTypeInAppImage(workingAppDir, targetFormat, logger, packageVersion.orNull)
             ensureMacAdHocSigning(workingAppDir, targetFormat)
 
-            val npx = detectNpx()
-            validateNodeVersion()
+            val node = detectNode()
+            val npm = detectNpm()
+            validateNodeVersion(node)
 
             val linuxIconOverride = prepareLinuxIconSet(outputDir)
             val windowsIconOverride = resolveWindowsIcon()
@@ -308,7 +331,9 @@ abstract class AbstractElectronBuilderPackageTask
                     outputDir = outputDir,
                     targets = buildElectronBuilderTargets(),
                     extraConfigArgs = extraConfigArgs,
-                    npx = npx,
+                    node = node,
+                    npm = npm,
+                    toolDir = File(outputDir, ELECTRON_BUILDER_TOOL_DIR_NAME),
                     environment = ebEnvironment,
                     publishFlag = resolvePublishFlag(),
                 ),
@@ -372,21 +397,26 @@ abstract class AbstractElectronBuilderPackageTask
             return flag
         }
 
-        private fun detectNpx(): File =
-            NodeJsDetector.detectNpx(
+        private fun detectNode(): File =
+            NodeJsDetector.detectNode(
                 customNodePath = customNodePath.orNull,
                 logger = logger,
             ) ?: throw GradleException(
-                "npx not found. Node.js 18+ is required for electron-builder packaging. " +
+                "node not found. Node.js 18+ is required for electron-builder packaging. " +
                     "Install Node.js or set the 'compose.electronBuilder.nodePath' Gradle property.",
             )
 
-        private fun validateNodeVersion() {
-            val node =
-                NodeJsDetector.detectNode(
-                    customNodePath = customNodePath.orNull,
-                    logger = logger,
-                ) ?: return
+        private fun detectNpm(): File =
+            NodeJsDetector.detectNpm(
+                customNodePath = customNodePath.orNull,
+                logger = logger,
+            ) ?: throw GradleException(
+                "npm not found. It provisions the pinned electron-builder toolchain from the " +
+                    "plugin's package-lock.json. Install Node.js 18+ (npm ships with it) or set " +
+                    "the 'compose.electronBuilder.nodePath' Gradle property.",
+            )
+
+        private fun validateNodeVersion(node: File) {
             val version = NodeJsDetector.getNodeVersion(node) ?: return
             if (!NodeJsDetector.isNodeVersionSupported(version)) {
                 throw GradleException(
@@ -783,6 +813,25 @@ abstract class AbstractElectronBuilderPackageTask
                 frameworksDir.walk().forEach { file ->
                     val path = file.toPath()
                     if (path.isRegularFile(LinkOption.NOFOLLOW_LINKS) && file.name.isDylibPath) {
+                        signer.sign(file, appEntitlements)
+                    }
+                }
+            }
+
+            // Re-sign native libs shipped next to the launcher. GraalVM native image puts its
+            // dylibs in Contents/MacOS/ and Contents/MacOS/lib/, and without signing them here they
+            // keep the earlier ad-hoc signature and get rejected during notarization. The JVM
+            // layout only has the launcher in Contents/MacOS/, so this is effectively a no-op there.
+            val macOsDir = appDir.resolve("Contents/MacOS")
+            if (macOsDir.exists()) {
+                // The main binary is signed by the bundle signing below, so skip it here.
+                val mainBinary = executableName.orNull?.let { macOsDir.resolve(it) }
+                macOsDir.walk().forEach { file ->
+                    if (file == mainBinary) return@forEach
+                    val path = file.toPath()
+                    if (path.isRegularFile(LinkOption.NOFOLLOW_LINKS) &&
+                        (path.isExecutable() || file.name.isDylibPath)
+                    ) {
                         signer.sign(file, appEntitlements)
                     }
                 }
@@ -1657,27 +1706,27 @@ abstract class AbstractElectronBuilderPackageTask
                 fi
                 """.trimIndent() + "\n"
 
-            val fullScript =
-                if (silentUpdate) {
-                    script + "\n" + LinuxUpdateHelper.polkitAfterInstallFragment()
-                } else {
-                    script
-                }
-            templateFile.writeText(fullScript)
+            val userScript =
+                linuxAfterInstall.orNull
+                    ?.asFile
+                    ?.takeIf { it.isFile }
+                    ?.readText()
+            templateFile.writeText(
+                LinuxUpdateHelper.composeAfterInstallScript(script, silentUpdate, userScript),
+            )
             logger.info("Generated Linux after-install template at: ${templateFile.absolutePath}")
             return templateFile
         }
 
         /**
-         * afterRemove template: removes the polkit policy for silent update (and keeps the
-         * default electron-builder unlink behavior via an empty base script when silent is off).
-         * Only generated when silent update is enabled.
+         * afterRemove template: removes the polkit policy for silent update and appends any
+         * user after-remove script. Omitted when neither is present so electron-builder keeps
+         * its default unlink behaviour.
          */
         private fun prepareLinuxAfterRemoveTemplate(
             outputDir: File,
             silentUpdate: Boolean,
         ): File? {
-            if (!silentUpdate) return null
             if (currentOS != OS.Linux) return null
             if (targetFormat != TargetFormat.Deb &&
                 targetFormat != TargetFormat.Rpm &&
@@ -1685,10 +1734,14 @@ abstract class AbstractElectronBuilderPackageTask
             ) {
                 return null
             }
+            val userScript =
+                linuxAfterRemove.orNull
+                    ?.asFile
+                    ?.takeIf { it.isFile }
+                    ?.readText()
+            val composed = LinuxUpdateHelper.composeAfterRemoveScript(silentUpdate, userScript) ?: return null
             val templateFile = outputDir.resolve("after-remove-nucleus.tpl")
-            templateFile.writeText(
-                "#!/bin/bash\n" + LinuxUpdateHelper.polkitAfterRemoveFragment(),
-            )
+            templateFile.writeText(composed)
             logger.info("Generated Linux after-remove template at: ${templateFile.absolutePath}")
             return templateFile
         }
@@ -1875,7 +1928,15 @@ abstract class AbstractElectronBuilderPackageTask
          * for parallel-safe builds. Called only after electron-builder finishes.
          */
         private fun cleanupBuildTemporaries(outputDir: File) {
-            for (dirName in listOf(".npm-cache", ".npm-prefix", ".electron-builder-cache", ".app-image")) {
+            for (dirName in
+                listOf(
+                    ".npm-cache",
+                    ".npm-prefix",
+                    ".electron-builder-cache",
+                    ELECTRON_BUILDER_TOOL_DIR_NAME,
+                    ".app-image",
+                )
+            ) {
                 val dir = File(outputDir, dirName)
                 if (dir.isDirectory) {
                     dir.deleteRecursively()
@@ -2024,11 +2085,17 @@ private fun copyAppImage(
 }
 
 /**
+ * Name of the build-local directory holding the provisioned electron-builder toolchain
+ * (`package.json`, `package-lock.json`, `node_modules`). Removed by `cleanupBuildTemporaries`.
+ */
+internal const val ELECTRON_BUILDER_TOOL_DIR_NAME = ".electron-builder-tool"
+
+/**
  * Returns an env map that isolates npm and electron-builder caches to subdirectories
  * of [outputDir]. This prevents EPERM/EBUSY errors on Windows when multiple
- * electron-builder tasks run in parallel and compete for shared caches (npx cache,
+ * electron-builder tasks run in parallel and compete for shared caches (npm cache,
  * NSIS downloads, etc.). The prefix is also isolated to avoid npm 11+ ECOMPROMISED
- * errors caused by concurrent npx invocations sharing the global prefix.
+ * errors caused by concurrent npm invocations sharing the global prefix.
  *
  * Additional npm config isolation (userconfig, globalconfig) prevents npm from
  * reading shared config files that could cause lock contention on Windows ARM64.

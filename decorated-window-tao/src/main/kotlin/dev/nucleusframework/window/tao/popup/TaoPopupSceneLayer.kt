@@ -12,8 +12,6 @@ import androidx.compose.ui.input.pointer.PointerButton
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerType
-import androidx.compose.ui.platform.PlatformContext
-import androidx.compose.ui.scene.CanvasLayersComposeScene
 import androidx.compose.ui.scene.ComposeScene
 import androidx.compose.ui.scene.ComposeSceneLayer
 import androidx.compose.ui.unit.Density
@@ -22,6 +20,7 @@ import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import dev.nucleusframework.window.tao.TaoCursorIcon
+import dev.nucleusframework.window.tao.event.appKitWheelToAwtScrollEvent
 import dev.nucleusframework.window.tao.event.dispatchNativeKeyEvent
 import dev.nucleusframework.window.tao.event.toTaoCursorIconCode
 import dev.nucleusframework.window.tao.ffi.NativeMetalBridge
@@ -29,7 +28,12 @@ import dev.nucleusframework.window.tao.ffi.PopupNativeBridge
 import dev.nucleusframework.window.tao.ffi.TaoNativeWireFormat
 import dev.nucleusframework.window.tao.scene.LocalTaoMetalTextureHost
 import dev.nucleusframework.window.tao.scene.TaoMetalTextureHost
+import dev.nucleusframework.window.tao.scene.TaoPlatformContextBase
 import dev.nucleusframework.window.tao.scene.TaoRecordedSurface
+import dev.nucleusframework.window.tao.scene.TaoSceneBundle
+import dev.nucleusframework.window.tao.scene.TaoSceneScrollRouter
+import dev.nucleusframework.window.tao.scene.canvasLayersSceneBundle
+import dev.nucleusframework.window.tao.scene.catchExceptions
 import dev.nucleusframework.window.tao.scene.recordSceneToPicture
 import org.jetbrains.skia.DirectContext
 
@@ -70,13 +74,13 @@ import org.jetbrains.skia.DirectContext
  *
  * Threading: every method must run on the macOS main thread.
  */
-@OptIn(InternalComposeUiApi::class)
+@OptIn(InternalComposeUiApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 internal class TaoPopupSceneLayer(
     private val host: TaoPopupHost,
     initialDensity: Density,
     initialLayoutDirection: LayoutDirection,
     initialFocusable: Boolean,
-    @Suppress("UNUSED_PARAMETER") parentCompositionContext: CompositionContext,
+    initialConsumePointerInputOutside: Boolean,
 ) : ComposeSceneLayer {
     private var _density = initialDensity
     private var _layoutDirection = initialLayoutDirection
@@ -196,22 +200,54 @@ internal class TaoPopupSceneLayer(
             override val containerSize: IntSize get() = sceneLayoutSize
         }
 
-    private val innerScene: ComposeScene =
-        CanvasLayersComposeScene(
+    private val sceneBundle: TaoSceneBundle =
+        canvasLayersSceneBundle(
+            coroutineContext = host.sceneCoroutineContext,
             density = _density,
             layoutDirection = _layoutDirection,
             size = sceneLayoutSize,
-            coroutineContext = host.sceneCoroutineContext,
             platformContext =
-                object : PlatformContext.Empty() {
+                object : TaoPlatformContextBase() {
+                    override val sceneScale: Float get() = _density.density
+
                     override val windowInfo: androidx.compose.ui.platform.WindowInfo
                         get() = popupWindowInfo
+
+                    // The panel's surface is per-pixel transparent, so dialog
+                    // scrims must use the alpha-aware blend — same contract as
+                    // Compose Desktop's `WindowComposeSceneLayer` (#559).
+                    override val isWindowTransparent: Boolean get() = true
 
                     override fun setPointerIcon(pointerIcon: PointerIcon) {
                         host.setCursor(pointerIcon.toTaoCursorIconCode())
                     }
                 },
-            invalidate = { host.requestRedraw() },
+            requestFrame = { host.requestRedraw() },
+        ).apply {
+            // Report through the owner window's channel — see [TaoPopupHost.exceptionHandler].
+            exceptionHandler = host.exceptionHandler
+        }
+
+    private val innerScene: ComposeScene get() = sceneBundle.scene
+
+    // Wheel → Scroll, trackpad gesture → Pan, same as the window host (#654).
+    private val scrollRouter =
+        TaoSceneScrollRouter(
+            object : TaoSceneScrollRouter.Target {
+                override val scene: ComposeScene get() = innerScene
+
+                // The layer scene's own density (live: Compose re-assigns it
+                // on a display hop, and it carries an app-level LocalDensity
+                // override at the Popup call site). That is the density the
+                // popup content measures with and the one MacOSCocoaConfig
+                // sizes a wheel notch with — so it is the one a pan must use
+                // to move the same distance. `host.scale` stays the surface's
+                // pixel-per-point ratio for nativeResize; the two differ on
+                // purpose whenever the app zooms its UI through LocalDensity.
+                override val scale: Float get() = _density.density
+
+                override fun guard(block: () -> Unit) = host.exceptionHandler.catchExceptions(block)
+            },
         )
 
     private var onPreviewKeyEvent: ((KeyEvent) -> Boolean)? = null
@@ -222,6 +258,9 @@ internal class TaoPopupSceneLayer(
      * Named inner class so GraalVM JNI reachability metadata can register
      * it explicitly. Anonymous-object subclasses of a JNI-accessed
      * interface aren't picked up by `GetMethodID` under native-image.
+     *
+     * Every method is guarded: these are AppKit callbacks into the panel's own
+     * scene, not nested inside the owner window's guarded frame pass.
      */
     private inner class PopupEventCallback : PopupNativeBridge.EventCallback {
         override fun onPointerEvent(
@@ -230,7 +269,7 @@ internal class TaoPopupSceneLayer(
             y: Float,
             button: Int,
             modifiers: Int,
-        ) {
+        ) = host.exceptionHandler.catchExceptions {
             val pointerButton =
                 when (button) {
                     TaoNativeWireFormat.BUTTON_PRIMARY -> PointerButton.Primary
@@ -243,6 +282,7 @@ internal class TaoPopupSceneLayer(
                     TaoNativeWireFormat.PTR_UP -> PointerEventType.Release
                     else -> PointerEventType.Move
                 }
+            if (eventType == PointerEventType.Press) scrollRouter.finishPan()
             innerScene.sendPointerEvent(
                 eventType = eventType,
                 position = Offset(x, y),
@@ -256,13 +296,10 @@ internal class TaoPopupSceneLayer(
             y: Float,
             dx: Float,
             dy: Float,
-        ) {
-            innerScene.sendPointerEvent(
-                eventType = PointerEventType.Scroll,
-                position = Offset(x, y),
-                scrollDelta = Offset(dx, dy),
-                type = PointerType.Mouse,
-            )
+            precise: Boolean,
+            gesturePhase: Int,
+        ) = host.exceptionHandler.catchExceptions {
+            scrollRouter.onScroll(x, y, appKitWheelToAwtScrollEvent(dx, dy, precise, gesturePhase))
         }
 
         override fun onKeyEvent(
@@ -270,7 +307,7 @@ internal class TaoPopupSceneLayer(
             vkCode: Int,
             codePoint: Int,
             modifiers: Int,
-        ) {
+        ) = host.exceptionHandler.catchExceptions {
             innerScene.dispatchNativeKeyEvent(
                 type = type,
                 vkCode = vkCode,
@@ -368,6 +405,11 @@ internal class TaoPopupSceneLayer(
             PopupNativeBridge.nativeSetFocusable(panelHandle, value)
         }
 
+    // Stored for the ComposeSceneLayer contract; the native popup panel handles
+    // outside-click dismissal via its own NSEvent monitor, so this flag is not
+    // consulted on the render path.
+    override var consumePointerInputOutside: Boolean = initialConsumePointerInputOutside
+
     init {
         // Apply the initial focusable state (constructor sets the field
         // but the setter is not invoked from a constructor parameter).
@@ -383,8 +425,9 @@ internal class TaoPopupSceneLayer(
         // AppKit event doesn't deref a half-disposed scene.
         PopupNativeBridge.nativeUninstallOutsideClickMonitor(panelHandle)
         PopupNativeBridge.nativeSetEventCallback(panelHandle, null)
+        scrollRouter.cancel()
         host.setCursor(TaoCursorIcon.DEFAULT)
-        innerScene.close()
+        sceneBundle.close()
         // Close the Skia context on its owning render thread. close() runs in
         // the host's main-thread record pass (Compose disposal), when the render
         // thread is idle, so this blocking hop returns immediately and can't race
@@ -404,7 +447,10 @@ internal class TaoPopupSceneLayer(
         PopupNativeBridge.nativeRelease(panelHandle)
     }
 
-    override fun setContent(content: @Composable () -> Unit) {
+    override fun setContent(
+        @Suppress("UNUSED_PARAMETER") parentCompositionContext: CompositionContext,
+        content: @Composable () -> Unit,
+    ) {
         innerScene.setContent {
             // Replay parent locals snapshot so MaterialTheme et al. flow
             // into the popup content. Compose's popup framework writes
@@ -470,7 +516,7 @@ internal class TaoPopupSceneLayer(
         return TaoRecordedSurface(
             attachmentHandle = attachmentHandle,
             directContext = directContext,
-            picture = recordSceneToPicture(innerScene, widthPx, heightPx),
+            picture = recordSceneToPicture(sceneBundle, widthPx, heightPx),
             clearColor = 0x00000000,
             isAlive = { !disposed },
         )

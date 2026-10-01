@@ -2,9 +2,11 @@ package dev.nucleusframework.window.tao.popup
 
 import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.window.WindowExceptionHandler
 import org.jetbrains.skia.DirectContext
 import kotlin.coroutines.CoroutineContext
 
@@ -19,6 +21,7 @@ import kotlin.coroutines.CoroutineContext
  * Threading: every call must run on the host HWND's UI thread.
  */
 @Suppress("TooManyFunctions")
+@OptIn(ExperimentalComposeUiApi::class)
 internal interface TaoPopupHostWindows {
     /** HWND of the host (Tao main) window. */
     val parentHwnd: Long
@@ -43,12 +46,28 @@ internal interface TaoPopupHostWindows {
     val sceneCoroutineContext: CoroutineContext
 
     /**
+     * The owner window's exception handler, so a popup scene reports failures
+     * through the same channel as the window it belongs to. See
+     * [TaoPopupHost.exceptionHandler].
+     */
+    val exceptionHandler: WindowExceptionHandler? get() = null
+
+    /**
      * Offset added to a popup's `boundsInWindow` before positioning the
      * popup HWND in screen coords. Non-zero when the popup originates
      * from a nested scene whose origin is not at the host window's
      * top-left.
      */
     val coordinateOffset: IntOffset get() = IntOffset.Zero
+
+    /**
+     * Whether the owner window was created per-pixel transparent
+     * (`DecoratedWindow(transparent = true)`, #416). Overlay scenes render
+     * inside the owner's surface, so they forward this as
+     * `PlatformContext.isWindowTransparent` — the hint Compose uses to pick
+     * the alpha-aware dialog-scrim blend mode (#559).
+     */
+    val isOwnerWindowTransparent: Boolean get() = false
 
     /**
      * The HOST scene's Skia DirectContext — shared with every

@@ -1,11 +1,13 @@
 @file:Suppress("MagicNumber")
-@file:OptIn(androidx.compose.ui.InternalComposeUiApi::class)
+@file:OptIn(
+    androidx.compose.ui.InternalComposeUiApi::class,
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+)
 
 package dev.nucleusframework.window.tao
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -25,6 +27,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.window.WindowExceptionHandler
 import dev.nucleusframework.core.runtime.LinuxDesktopEnvironment
 import dev.nucleusframework.core.runtime.Platform
 import dev.nucleusframework.window.DecoratedWindowState
@@ -48,6 +51,7 @@ import dev.nucleusframework.window.tao.popup.LocalTaoPopupHost
 import dev.nucleusframework.window.tao.scene.TaoComposeSceneHost
 import dev.nucleusframework.window.tao.scene.TaoComposeSceneHostLinux
 import dev.nucleusframework.window.tao.scene.TaoComposeSceneHostWindows
+import dev.nucleusframework.window.tao.scene.catchExceptions
 import kotlin.math.roundToInt
 
 /**
@@ -262,25 +266,37 @@ internal fun ApplicationScope.openDecoratedWindow(
     // parent window's theme/user locals from the first composition without
     // hijacking popup positioning. See [LocalTaoCompositionLocalContextBridge].
     initialCompositionLocalContext: CompositionLocalContext? = null,
+    // Linux only: give this window an X11 surface even on a native Wayland
+    // session — see DecoratedWindow(forceX11 = …).
+    forceX11: Boolean = false,
+    // Builds the handler that catches exceptions raised by user code inside
+    // this window (frames, input, IME, a11y). Read once, in the parent
+    // composition, from [LocalWindowExceptionHandlerFactory] — the handler is
+    // then held in a plain field on the host, because it must also cover
+    // exceptions that break the composition it would otherwise be read from.
+    exceptionHandlerFactory: WindowExceptionHandlerFactory = DefaultWindowExceptionHandlerFactory,
     content: @Composable TaoDecoratedWindowScope.() -> Unit,
 ): TaoWindow {
     // hiddenFromDock rides on the GTK skip-taskbar/skip-pager hint, which
     // native Wayland does not honour: there is no client-side skip-taskbar
     // protocol on Wayland (xdg-shell, gtk_shell1 and the staging extensions all
     // lack it, and Mutter rejects wlr-layer-shell). It is effective only under
-    // X11/XWayland. Warn so the no-op isn't silent — force XWayland with
-    // NUCLEUS_TAO_LINUX_RENDERER=x11 to actually hide the window.
-    val forcesXWayland =
-        System.getenv("GDK_BACKEND").orEmpty().equals("x11", ignoreCase = true) ||
+    // X11/XWayland. Warn so the no-op isn't silent — either take an X11
+    // surface for this window ([forceX11]) or put the whole app on XWayland
+    // with NUCLEUS_TAO_LINUX_RENDERER=x11.
+    val willBeX11 =
+        forceX11 ||
+            System.getenv("GDK_BACKEND").orEmpty().equals("x11", ignoreCase = true) ||
             System.getenv("NUCLEUS_TAO_LINUX_RENDERER").orEmpty().equals("x11", ignoreCase = true)
     if (hiddenFromDock &&
         Platform.Current == Platform.Linux &&
         Platform.isWayland &&
-        !forcesXWayland
+        !willBeX11
     ) {
         hiddenFromDockLogger.warning(
             "hiddenFromDock has no effect on native Wayland: Wayland has no client-side " +
-                "skip-taskbar protocol. Run with NUCLEUS_TAO_LINUX_RENDERER=x11 (XWayland) to hide the window.",
+                "skip-taskbar protocol. Pass forceX11 = true for this window, or run with " +
+                "NUCLEUS_TAO_LINUX_RENDERER=x11 (XWayland) for the whole app.",
         )
     }
     val window =
@@ -312,10 +328,16 @@ internal fun ApplicationScope.openDecoratedWindow(
             // TaoComposeSceneHost.attach() instead.
             skipTaskbar = hiddenFromDock,
             transparent = transparent,
+            forceX11 = forceX11,
             // Tao defaults borderless windows to a drop shadow (DWM on
             // Windows, NSWindow.hasShadow on macOS). Overlays must opt out
-            // or the ghost still shows a soft contour.
-            undecoratedShadow = !undecorated,
+            // or the ghost still shows a soft contour. Fully transparent
+            // windows drop it on Windows too: the style-level shadow traces
+            // the rectangular HWND, not the content-defined shape (#416) —
+            // macOS keeps it (AppKit shapes the shadow to the drawn content)
+            // and Linux keeps its CSD hidden-titlebar path.
+            undecoratedShadow =
+                !undecorated && !(transparent && Platform.Current == Platform.Windows),
         )
 
     // Compose Hot Reload: the agent only auto-wraps AWT `ComposeWindow`/
@@ -332,6 +354,8 @@ internal fun ApplicationScope.openDecoratedWindow(
     if (popupFor == null) {
         TaoHotReloadIntegration.trackWindow(window, title, alwaysOnTop)
     }
+
+    val exceptionHandler = exceptionHandlerFactory.exceptionHandler(window)
 
     if (Platform.Current == Platform.Windows) {
         return openDecoratedWindowWindows(
@@ -352,6 +376,7 @@ internal fun ApplicationScope.openDecoratedWindow(
             initialCompositionLocalContext,
             nativePopupLayers,
             transparent,
+            exceptionHandler,
             hotReloadContent,
         )
     }
@@ -375,6 +400,7 @@ internal fun ApplicationScope.openDecoratedWindow(
             initialCompositionLocalContext,
             nativePopupLayers,
             transparent,
+            exceptionHandler,
             hotReloadContent,
         )
     }
@@ -389,6 +415,7 @@ internal fun ApplicationScope.openDecoratedWindow(
     host.nativePopupLayers = nativePopupLayers
     host.previewKeyHandler = onPreviewKeyEvent
     host.keyHandler = onKeyEvent
+    host.exceptionHandler = exceptionHandler
     host.setSceneCompositionLocalContext(initialCompositionLocalContext)
 
     // Trackpad pinch / rotate / smart-magnify, intercepted before AppKit
@@ -396,7 +423,9 @@ internal fun ApplicationScope.openDecoratedWindow(
     // these events). Synthesised as two-finger Touch pointers in the host
     // so cross-platform `detectTransformGestures` reacts uniformly.
     window.onTrackpadGesture { kind, phase, x, y, value ->
-        if (enabled) host.onTrackpadGesture(kind, phase, x, y, value)
+        exceptionHandler.catchExceptions {
+            if (enabled) host.onTrackpadGesture(kind, phase, x, y, value)
+        }
     }
 
     // ── macOS accessibility ────────────────────────────────────────────────
@@ -511,7 +540,7 @@ internal fun ApplicationScope.openDecoratedWindow(
                         }
                     }
                 }
-                Column(modifier = Modifier.fillMaxSize()) {
+                WindowSceneColumn {
                     scopeFactory().hotReloadContent()
                 }
             }
@@ -554,12 +583,18 @@ internal fun ApplicationScope.openDecoratedWindow(
         host.detach()
     }
     window.onScaleFactorChanged { host.onScaleFactorChanged(it) }
-    window.onPointerMoved { x, y -> if (enabled) host.onPointerMove(x, y) }
-    window.onPointerExited { if (enabled) host.onPointerExited() }
-    window.onPointerButton { b, p -> if (enabled) host.onPointerButton(b, p) }
-    window.onPointerScroll { event -> if (enabled) host.onPointerScroll(event) }
+    // Input dispatch runs app code (gesture callbacks, key handlers), so every
+    // entry is guarded — the Tao counterpart of AWT's `catchExceptions`-wrapped
+    // `onMouseEvent` / `onKeyEvent`. Frames are guarded one level down, inside
+    // `TaoSceneBundle.render`.
+    window.onPointerMoved { x, y -> exceptionHandler.catchExceptions { if (enabled) host.onPointerMove(x, y) } }
+    window.onPointerExited { exceptionHandler.catchExceptions { if (enabled) host.onPointerExited() } }
+    window.onPointerButton { b, p -> exceptionHandler.catchExceptions { if (enabled) host.onPointerButton(b, p) } }
+    window.onPointerScroll { event -> exceptionHandler.catchExceptions { if (enabled) host.onPointerScroll(event) } }
     window.onKeyEvent { type, vk, loc, mods, cp ->
-        if (enabled) host.onKeyEvent(type, vk, loc, mods, cp) else false
+        exceptionHandler.catchExceptions(fallback = false) {
+            if (enabled) host.onKeyEvent(type, vk, loc, mods, cp) else false
+        }
     }
     window.onRedrawRequested { host.requestFrame() }
     window.onFocusChanged { focused ->
@@ -625,12 +660,14 @@ private fun ApplicationScope.openDecoratedWindowLinux(
     initialCompositionLocalContext: CompositionLocalContext?,
     nativePopupLayers: Boolean,
     transparent: Boolean,
+    exceptionHandler: WindowExceptionHandler,
     content: @Composable TaoDecoratedWindowScope.() -> Unit,
 ): TaoWindow {
     val host = TaoComposeSceneHostLinux(window, fullyTransparent = transparent)
     host.nativePopupLayers = nativePopupLayers
     host.previewKeyHandler = onPreviewKeyEvent
     host.keyHandler = onKeyEvent
+    host.exceptionHandler = exceptionHandler
     // Yaru-style hidden-titlebar CSD (native GTK shadow ring): created via
     // `undecoratedShadow = !undecorated` at openWindow time; the host aligns
     // the frame radius and extends the resize band over the ring. Only
@@ -710,8 +747,10 @@ private fun ApplicationScope.openDecoratedWindowLinux(
             ) {
                 // Default: CSD outline (vanilla-style frame for custom chrome).
                 // `undecorated` = fully borderless overlay — no Compose stroke.
+                // `transparent` skips it too: the stroke traces the rectangular
+                // window bounds, not the content-defined shape (#416).
                 val border =
-                    if (undecorated) {
+                    if (undecorated || transparent) {
                         Modifier
                     } else {
                         rememberUndecoratedWindowBorder(
@@ -735,7 +774,7 @@ private fun ApplicationScope.openDecoratedWindowLinux(
                             isFullscreen = stateHolder.value.isFullscreen,
                             modifier = Modifier.fillMaxSize().then(border),
                         ) {
-                            Column(modifier = Modifier.fillMaxSize()) {
+                            WindowSceneColumn {
                                 scopeFactory().content()
                             }
                         }
@@ -854,19 +893,29 @@ private fun ApplicationScope.openDecoratedWindowLinux(
             stateHolder.value = stateHolder.value.copy(active = settled)
         }
     }
+    // Input dispatch runs app code (gesture callbacks, key handlers), so every
+    // entry is guarded — the Tao counterpart of AWT's `catchExceptions`-wrapped
+    // `onMouseEvent` / `onKeyEvent`. Frames are guarded one level down, inside
+    // `TaoSceneBundle.render`.
     window.onPointerMoved { x, y ->
-        if (enabled) host.onPointerMove(x, y)
-        settleAfterGrab()
+        exceptionHandler.catchExceptions {
+            if (enabled) host.onPointerMove(x, y)
+            settleAfterGrab()
+        }
     }
-    window.onPointerExited { if (enabled) host.onPointerExited() }
+    window.onPointerExited { exceptionHandler.catchExceptions { if (enabled) host.onPointerExited() } }
     window.onPointerButton { b, p ->
-        if (enabled) host.onPointerButton(b, p)
-        settleAfterGrab()
+        exceptionHandler.catchExceptions {
+            if (enabled) host.onPointerButton(b, p)
+            settleAfterGrab()
+        }
     }
-    window.onPointerScroll { event -> if (enabled) host.onPointerScroll(event) }
+    window.onPointerScroll { event -> exceptionHandler.catchExceptions { if (enabled) host.onPointerScroll(event) } }
     window.onDragWindow { host.onNativeWindowDragStarted() }
     window.onKeyEvent { type, vk, loc, mods, cp ->
-        if (enabled) host.onKeyEvent(type, vk, loc, mods, cp) else false
+        exceptionHandler.catchExceptions(fallback = false) {
+            if (enabled) host.onKeyEvent(type, vk, loc, mods, cp) else false
+        }
     }
     window.onRedrawRequested { host.onRedrawRequested() }
     window.onFocusChanged { focused ->
@@ -1029,6 +1078,7 @@ private fun ApplicationScope.openDecoratedWindowWindows(
     initialCompositionLocalContext: CompositionLocalContext?,
     nativePopupLayers: Boolean,
     transparent: Boolean,
+    exceptionHandler: WindowExceptionHandler,
     content: @Composable TaoDecoratedWindowScope.() -> Unit,
 ): TaoWindow {
     val host =
@@ -1040,6 +1090,7 @@ private fun ApplicationScope.openDecoratedWindowWindows(
     host.nativePopupLayers = nativePopupLayers
     host.previewKeyHandler = onPreviewKeyEvent
     host.keyHandler = onKeyEvent
+    host.exceptionHandler = exceptionHandler
     host.setSceneCompositionLocalContext(initialCompositionLocalContext)
 
     // Trackpad pinch-to-zoom. Windows delivers a precision-touchpad pinch (and
@@ -1048,7 +1099,9 @@ private fun ApplicationScope.openDecoratedWindowWindows(
     // two-finger Touch pinch so cross-platform `detectTransformGestures` zooms
     // uniformly — same model as macOS.
     window.onTrackpadGesture { kind, phase, x, y, value ->
-        if (enabled) host.onTrackpadGesture(kind, phase, x, y, value)
+        exceptionHandler.catchExceptions {
+            if (enabled) host.onTrackpadGesture(kind, phase, x, y, value)
+        }
     }
 
     // ── Windows accessibility (AccessKit → UIA) ────────────────────────────
@@ -1150,9 +1203,11 @@ private fun ApplicationScope.openDecoratedWindowWindows(
                 }
                 // Default: CSD outline for custom chrome windows. `undecorated`
                 // means fully borderless (vanilla Compose Desktop semantics for
-                // overlays/ghosts) — do not stroke a frame.
+                // overlays/ghosts) — do not stroke a frame. `transparent`
+                // windows skip it too: the DWM 1px frame follows the
+                // rectangular HWND, not the content-defined shape (#416).
                 val border =
-                    if (undecorated) {
+                    if (undecorated || transparent) {
                         Modifier
                     } else {
                         rememberUndecoratedWindowBorder(
@@ -1178,7 +1233,7 @@ private fun ApplicationScope.openDecoratedWindowWindows(
                             isFullscreen = stateHolder.value.isFullscreen,
                             modifier = Modifier.fillMaxSize().then(border),
                         ) {
-                            Column(modifier = Modifier.fillMaxSize()) {
+                            WindowSceneColumn {
                                 scopeFactory().content()
                             }
                         }
@@ -1351,10 +1406,14 @@ private fun ApplicationScope.openDecoratedWindowWindows(
                 NativeTaoWindowsNativeViewBridge.isLoaded &&
                     NativeTaoWindowsNativeViewBridge.nativeIsFocusInTree(window.nativeHandle)
             )
-    window.onPointerMoved { x, y -> if (enabled) host.onPointerMove(x, y) }
-    window.onPointerExited { if (enabled) host.onPointerExited() }
-    window.onPointerButton { b, p -> if (enabled) host.onPointerButton(b, p) }
-    window.onPointerScroll { event -> if (enabled) host.onPointerScroll(event) }
+    // Input dispatch runs app code (gesture callbacks, key handlers), so every
+    // entry is guarded — the Tao counterpart of AWT's `catchExceptions`-wrapped
+    // `onMouseEvent` / `onKeyEvent`. Frames are guarded one level down, inside
+    // `TaoSceneBundle.render`.
+    window.onPointerMoved { x, y -> exceptionHandler.catchExceptions { if (enabled) host.onPointerMove(x, y) } }
+    window.onPointerExited { exceptionHandler.catchExceptions { if (enabled) host.onPointerExited() } }
+    window.onPointerButton { b, p -> exceptionHandler.catchExceptions { if (enabled) host.onPointerButton(b, p) } }
+    window.onPointerScroll { event -> exceptionHandler.catchExceptions { if (enabled) host.onPointerScroll(event) } }
     // WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE brackets the modal MOVE and RESIZE
     // loops exactly, so it is the only mask signal needed here — unlike Linux,
     // no pointer-driven fallback is required, and using one would be harmful:
@@ -1373,7 +1432,9 @@ private fun ApplicationScope.openDecoratedWindowWindows(
         host.onResizeLoopChanged(active)
     }
     window.onKeyEvent { type, vk, loc, mods, cp ->
-        if (enabled) host.onKeyEvent(type, vk, loc, mods, cp) else false
+        exceptionHandler.catchExceptions(fallback = false) {
+            if (enabled) host.onKeyEvent(type, vk, loc, mods, cp) else false
+        }
     }
     window.onRedrawRequested { host.onRedrawRequested() }
     window.onFocusChanged { focused ->

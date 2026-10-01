@@ -612,7 +612,9 @@ internal fun JvmApplicationContext.configureGraalvmApplication() {
             taskNameObject = "graalvmPlatformMetadata",
         ) {
             description = "Generate platform-specific GraalVM metadata for AWT/Java2D and main class"
+            val headlessForMetadata = graalvm.headless.get()
             inputs.property("mainClass", mainClassName ?: "")
+            inputs.property("headless", headlessForMetadata)
             outputs.dir(platformMetadataDir)
 
             doLast {
@@ -622,8 +624,15 @@ internal fun JvmApplicationContext.configureGraalvmApplication() {
                         OS.MacOS -> "macos"
                         OS.Linux -> "linux"
                     }
-                writePlatformMetadata(platform, platformMetadataDir.get().asFile, mainClassName)
-                logger.lifecycle("Platform metadata ($platform) written to: ${platformMetadataDir.get().asFile}")
+                writePlatformMetadata(
+                    platform,
+                    platformMetadataDir.get().asFile,
+                    mainClassName,
+                    headless = headlessForMetadata,
+                )
+                logger.lifecycle(
+                    "Platform metadata ($platform${if (headlessForMetadata) ", headless" else ""}) written to: ${platformMetadataDir.get().asFile}",
+                )
             }
         }
 
@@ -723,6 +732,7 @@ internal fun JvmApplicationContext.configureGraalvmApplication() {
                         "Filter and merge per-library GraalVM metadata based on runtime classpath"
                     task.group = NUCLEUS_TASK_GROUP
                     task.outputDir.set(libraryMetadataDir)
+                    task.headless.set(graalvm.headless)
                     if (runtimeCfg != null) {
                         task.runtimeClasspath.from(runtimeCfg)
                     }
@@ -916,6 +926,7 @@ internal fun JvmApplicationContext.configureGraalvmApplication() {
             val resolvedMaxHeapSizePercent = graalvm.maxHeapSizePercent.get()
             val resolvedGarbageCollector = graalvm.garbageCollector.orNull
             val resolvedImageName = imageName.get()
+            val resolvedHeadless = graalvm.headless.get()
             val resolvedUberJar = uberJarFile.get().asFile.absolutePath
             val resolvedMacOsMinVersion =
                 if (currentOS == OS.MacOS) graalvm.macOS.minimumSystemVersion.get() else null
@@ -991,6 +1002,7 @@ internal fun JvmApplicationContext.configureGraalvmApplication() {
             inputs.property("pgoMode", resolvedPgoMode)
             inputs.property("pgoEnabled", resolvedPgoEnabled)
             inputs.property("imageName", resolvedImageName)
+            inputs.property("headless", resolvedHeadless)
             if (resolvedMacOsMinVersion != null) {
                 inputs.property("macOsMinVersion", resolvedMacOsMinVersion)
             }
@@ -1038,6 +1050,9 @@ internal fun JvmApplicationContext.configureGraalvmApplication() {
                         // in as a launcher default so the produced binary never prints the warning
                         // and stays forward-compatible. Placed before user buildArgs (last wins).
                         add("--enable-native-access=ALL-UNNAMED")
+                        if (resolvedHeadless) {
+                            add("-Djava.awt.headless=true")
+                        }
 
                         // Garbage collector + default runtime max heap. Serial GC otherwise defaults
                         // to 80% of RAM; bake a desktop-appropriate ceiling (JVM parity, ~25%)
@@ -1268,6 +1283,7 @@ internal fun JvmApplicationContext.configureGraalvmApplication() {
                 )
             OS.Linux ->
                 configureLinuxGraalvmPackaging(
+                    graalvm,
                     graalvmHome,
                     nativeImageCompile,
                     nativeCompileDir,
@@ -1488,17 +1504,37 @@ private fun JvmApplicationContext.configureMacOsGraalvmPackaging(
             taskNameAction = "copy",
             taskNameObject = "graalvmJawtToLib",
         ) {
-            description = "Copy libjawt.dylib + fontconfig to lib/ subdir for Skiko and AWT font init"
+            description = "Copy libjawt.dylib to lib/ subdir for Skiko"
             dependsOn(nativeImageCompile, cleanAppBundle)
             doNotTrackState("Output directory is modified by downstream strip/codesign tasks")
             from(graalvmHome.map { "$it/lib" }) {
-                // fontconfig.bfc: SunFontManager/FontConfiguration reads it from <java.home>/lib at
-                // startup; java.home is the executable dir under native image, so without it
-                // FontConfiguration.getVersion() throws "Fontconfig head is null" the first time AWT
-                // font code runs (e.g. Font.createFont / BufferedImage.createGraphics).
-                include("libjawt.dylib", "fontconfig.bfc")
+                include("libjawt.dylib")
             }
             into(appBundleDir.map { it.dir("MacOS/lib") })
+        }
+
+    // fontconfig.bfc: SunFontManager/FontConfiguration needs it at startup, otherwise
+    // FontConfiguration.getVersion() throws "Fontconfig head is null" the first time AWT font code
+    // runs (e.g. Font.createFont / BufferedImage.createGraphics).
+    //
+    // It must NOT live under Contents/MacOS/ (subdirectories included): Gatekeeper treats every
+    // file there as nested code, so a non-Mach-O file makes `spctl -a -t exec` reject the bundle
+    // even when it is Developer ID signed, notarized and stapled. Contents/Resources/ is the
+    // sanctioned place for data files; at runtime GraalVmInitializer points the JDK at it via the
+    // `sun.awt.fontconfig` system property, since FontConfiguration otherwise only scans
+    // <java.home>/lib. Windows/Linux keep the lib/ layout (no Gatekeeper, see copyFontConfig).
+    val copyGraalvmFontConfig =
+        tasks.register<Copy>(
+            taskNameAction = "copy",
+            taskNameObject = "graalvmFontConfig",
+        ) {
+            description = "Copy fontconfig.bfc into .app bundle Resources for AWT font init"
+            dependsOn(nativeImageCompile, cleanAppBundle)
+            doNotTrackState("Output directory is modified by downstream strip/codesign tasks")
+            from(graalvmHome.map { "$it/lib" }) {
+                include("fontconfig.bfc")
+            }
+            into(appBundleDir.map { it.dir("Resources") })
         }
 
     val skikoLibName = "libskiko-${currentOS.id}-${currentArch.id}.dylib"
@@ -1854,7 +1890,7 @@ private fun JvmApplicationContext.configureMacOsGraalvmPackaging(
             taskNameObject = "graalvmBundle",
         ) {
             description = "Ad-hoc sign the entire .app bundle"
-            dependsOn(codesignDylibs, copyBinary, copyAppResources, fixRpath, stripBinary, copyInfoPlist, copyJawtToLib, copySkikoLib, copyIcon)
+            dependsOn(codesignDylibs, copyBinary, copyAppResources, fixRpath, stripBinary, copyInfoPlist, copyJawtToLib, copyGraalvmFontConfig, copySkikoLib, copyIcon)
             copyFileAssociationIcons?.let { dependsOn(it) }
             val bundleDir = graalvmOutputDir.map { it.dir(appBundleName.get()) }
             commandLine("codesign", "--force", "--deep", "--sign", "-", bundleDir.get().asFile.absolutePath)
@@ -1870,6 +1906,7 @@ private fun JvmApplicationContext.configureMacOsGraalvmPackaging(
             copyAppResources,
             copyAwtDylibs,
             copyJawtToLib,
+            copyGraalvmFontConfig,
             copySkikoLib,
             stripDylibs,
             stripBinary,
@@ -2038,7 +2075,10 @@ private fun JvmApplicationContext.configureWindowsGraalvmPackaging(
         taskNameObject = "graalvmNative",
     ) {
         description = "Build native image and package with DLLs"
-        dependsOn(copyBinary, copyAppResources, copyAwtDlls, copyJvmDll, copyJawtToBin, copySkikoLib, copyFontConfig)
+        dependsOn(copyBinary, copyAppResources)
+        if (!graalvm.headless.get()) {
+            dependsOn(copyAwtDlls, copyJvmDll, copyJawtToBin, copySkikoLib, copyFontConfig)
+        }
         copyCRuntime?.let { dependsOn(it) }
     }
 }
@@ -2049,12 +2089,14 @@ private fun JvmApplicationContext.configureWindowsGraalvmPackaging(
 
 @Suppress("LongParameterList")
 private fun JvmApplicationContext.configureLinuxGraalvmPackaging(
+    graalvm: GraalvmSettings,
     graalvmHome: org.gradle.api.provider.Provider<String>,
     nativeImageCompile: TaskProvider<Exec>,
     nativeCompileDir: org.gradle.api.provider.Provider<org.gradle.api.file.Directory>,
     imageName: org.gradle.api.provider.Provider<String>,
     packageUberJar: TaskProvider<Jar>,
 ): TaskProvider<DefaultTask> {
+    val headless = graalvm.headless.get()
     val outputDir = graalvmOutputDir.map { it.dir(resolvedPackageNameProvider().get()) }
 
     val copyBinary =
@@ -2198,18 +2240,17 @@ private fun JvmApplicationContext.configureLinuxGraalvmPackaging(
         taskNameObject = "graalvmNative",
     ) {
         description = "Build native image and package with .so libs"
-        dependsOn(
-            copyBinary,
-            copyAppResources,
-            copyAwtSoLibs,
-            copyJvmSo,
-            copyJawtToLib,
-            copySkikoLib,
-            fixRpath,
-            fixSoRpath,
-            stripSoLibs,
-            stripBinary,
-        )
+        dependsOn(copyBinary, copyAppResources, fixRpath, stripBinary)
+        if (!headless) {
+            dependsOn(
+                copyAwtSoLibs,
+                copyJvmSo,
+                copyJawtToLib,
+                copySkikoLib,
+                fixSoRpath,
+                stripSoLibs,
+            )
+        }
     }
 }
 
@@ -2293,6 +2334,10 @@ private fun JvmApplicationContext.configureGraalvmElectronBuilderPackaging(
                 executableName.set(imageName)
                 customNodePath.set(NucleusProperties.electronBuilderNodePath(project.providers))
                 publishMode.set(NucleusProperties.electronBuilderPublishMode(project.providers))
+                linuxAfterInstall.set(app.nativeDistributions.linux.afterInstall)
+                linuxAfterRemove.set(app.nativeDistributions.linux.afterRemove)
+                linuxBeforeInstall.set(app.nativeDistributions.linux.beforeInstall)
+                linuxBeforeRemove.set(app.nativeDistributions.linux.beforeRemove)
                 distributions = app.nativeDistributions
             }
 

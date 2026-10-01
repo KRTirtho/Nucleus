@@ -2,7 +2,6 @@
 
 package dev.nucleusframework.window.tao.scene
 
-import androidx.compose.runtime.BroadcastFrameClock
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
@@ -11,36 +10,37 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.InternalComposeUiApi
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.asComposeCanvas
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerKeyboardModifiers
 import androidx.compose.ui.input.pointer.PointerType
-import androidx.compose.ui.scene.CanvasLayersComposeScene
 import androidx.compose.ui.scene.ComposeScene
 import androidx.compose.ui.scene.ComposeScenePointer
-import androidx.compose.ui.scene.PlatformLayersComposeScene
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.WindowExceptionHandler
 import dev.nucleusframework.core.runtime.LinuxDesktopEnvironment
 import dev.nucleusframework.window.tao.GlobalLayoutDirection
+import dev.nucleusframework.window.tao.TaoApplication
 import dev.nucleusframework.window.tao.TaoEventCode
 import dev.nucleusframework.window.tao.TaoGpuRenderContextConsumers
 import dev.nucleusframework.window.tao.TaoModifierMask
+import dev.nucleusframework.window.tao.TaoNonFatalCoroutineExceptionHandler
 import dev.nucleusframework.window.tao.TaoPointerScrollEvent
 import dev.nucleusframework.window.tao.TaoTouchEvent
 import dev.nucleusframework.window.tao.TaoTrackpadGesture
 import dev.nucleusframework.window.tao.TaoTrackpadPhase
 import dev.nucleusframework.window.tao.TaoWindow
+import dev.nucleusframework.window.tao.clipboard.ProvideTaoClipboard
 import dev.nucleusframework.window.tao.deco.ResizeFrameDecoration
 import dev.nucleusframework.window.tao.deco.TaoLinuxOverlayController
 import dev.nucleusframework.window.tao.deco.TaoLinuxOverlayControllerImpl
-import dev.nucleusframework.window.tao.event.TaoSyntheticMouseWheelEvent
 import dev.nucleusframework.window.tao.event.TaoWheelPinchZoom
+import dev.nucleusframework.window.tao.event.dispatchAwtShapedScroll
 import dev.nucleusframework.window.tao.event.taoKeyEvent
 import dev.nucleusframework.window.tao.event.taoKeyboardModifiers
 import dev.nucleusframework.window.tao.event.taoTypedKeyEvent
@@ -55,6 +55,8 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.jetbrains.skia.BackendRenderTarget
@@ -103,7 +105,7 @@ import kotlin.coroutines.CoroutineContext as KCoroutineContext
  * area. The EGL content subsurface is positioned at GTK's content-area origin
  * (see [applyContentOffset]); X11 keeps the flat undecorated presentation.
  */
-@OptIn(InternalComposeUiApi::class)
+@OptIn(InternalComposeUiApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Suppress("LargeClass", "TooManyFunctions")
 internal class TaoComposeSceneHostLinux(
     private val window: TaoWindow,
@@ -128,6 +130,15 @@ internal class TaoComposeSceneHostLinux(
         androidx.compose.runtime.mutableStateOf(
             if (fullyTransparent) 0 else 0xFFFFFFFF.toInt(),
         )
+
+    /**
+     * IME preedit / commit routing (#558).
+     *
+     * No typed-key fallback: that argument exists for the macOS PressAndHold
+     * accent picker, which has no GTK counterpart — an input method only ever
+     * delivers text while a text-input session is up.
+     */
+    private val imeSession = TaoImeSession()
 
     /** App-level pre-dispatch hook. See [TaoComposeSceneHost.previewKeyHandler]. */
     var previewKeyHandler: ((KeyEvent) -> Boolean)? = null
@@ -182,7 +193,8 @@ internal class TaoComposeSceneHostLinux(
     private var currentKeyboardModifiers: PointerKeyboardModifiers = PointerKeyboardModifiers()
     private var attachmentHandle: Long = 0
     private var directContext: DirectContext? = null
-    private var scene: ComposeScene? = null
+    private var sceneBundle: TaoSceneBundle? = null
+    private val scene: ComposeScene? get() = sceneBundle?.scene
 
     /**
      * Handle `TextureView`s in this window's scene import onto — see
@@ -202,7 +214,6 @@ internal class TaoComposeSceneHostLinux(
 
     /** Parent locals bridged via [setSceneCompositionLocalContext]; applied to the scene once created. */
     private var pendingCompositionLocalContext: androidx.compose.runtime.CompositionLocalContext? = null
-    private val frameClock = BroadcastFrameClock()
     private val flushingDispatcher = FlushingMainDispatcher()
 
     /** Floating text-selection bar shown on touch selection. */
@@ -255,6 +266,29 @@ internal class TaoComposeSceneHostLinux(
      * opaque region. Tracked by handle so duplicate attach/detach is safe.
      */
     private val attachedNativeViews: MutableSet<Long> = linkedSetOf()
+    private val nativeViewRects: MutableMap<Long, IntArray> = LinkedHashMap()
+
+    /**
+     * Latched on the first [NativeView] attach and never cleared: an embedded
+     * widget with a GPU compositor (WebKitWebView) issues GL calls on this
+     * same thread — between our frames, during its own teardown after detach,
+     * and crucially **in the middle of our render pass**: composition effects
+     * running inside `bundle.render` (a `loadUrl` in `update {}`, the realize
+     * triggered by the mount) hand control to WebKit, which makes its own EGL
+     * context current and does not restore ours. Skia only *issues* its GL at
+     * flush time, so the whole frame's GPU work — including the glyph-atlas
+     * uploads for every piece of text first drawn on that frame — would land
+     * in the foreign context; those atlas entries stay blank forever and text
+     * renders with randomly missing glyph instances (seen on Mutter+NVIDIA;
+     * Weston's WebKit init path never swaps the context mid-frame).
+     *
+     * Once latched, every frame (1) re-binds our context and invalidates
+     * Skia's GL state cache after `bundle.render`, before any GPU work, and
+     * (2) `resetGLAll()`s at frame start for the between-frames case — same
+     * protocol as [TaoGpuRenderContext.withContextCurrent] and the standalone
+     * popup host.
+     */
+    private var foreignGlInterop = false
 
     private var widthPx: Int = 0
     private var heightPx: Int = 0
@@ -343,6 +377,15 @@ internal class TaoComposeSceneHostLinux(
 
     private var lastPointerX: Float = 0f
     private var lastPointerY: Float = 0f
+
+    // Sub-pixel deadband (#615): the wire delivers 1/1024-px positions, so
+    // click jitter under 1 dp must not reach the scene — Compose's mouse
+    // slop is 0.125 dp, and a parent drag gesture consuming that phantom
+    // move cancels the child's tap ("buttons need two clicks"). Mouse events
+    // dispatched to the scene use the deadband's position, never the raw
+    // lastPointerX/Y (SyntheticEventSender would re-inject the difference);
+    // the raw position keeps feeding the resize band and gesture centres.
+    private val pointerDeadband = TaoPointerDeadband()
 
     /**
      * Codes of the currently-pressed mouse buttons. While non-empty a drag is
@@ -435,6 +478,11 @@ internal class TaoComposeSceneHostLinux(
                 getRootNode = { scene!!.rootDragAndDropNode },
                 outboundLauncher = ::launchLinuxOutboundDrag,
             )
+        // IME callbacks edit the focused field through `TextEditingScope`, i.e.
+        // they run user code straight off a GTK IM callback — the Tao
+        // counterpart of AWT's guarded `inputMethodTextChanged`.
+        window.imePreedit = { text -> exceptionHandler.catchExceptions { imeSession.preedit(text) } }
+        window.imeCommit = { text -> exceptionHandler.catchExceptions { imeSession.commit(text) } }
         val platformContext =
             LinuxTaoPlatformContext(
                 windowHandle = window.handle,
@@ -455,50 +503,53 @@ internal class TaoComposeSceneHostLinux(
                 // the page content but popups (rendered in a higher
                 // ComposeSceneLayer) naturally float above both.
                 topInsetPx = { 0 },
+                scaleProvider = { scale },
                 windowInfo = windowInfo,
                 semanticsOwnerListener = semanticsOwnerListener,
                 dragAndDropManager = dndManager,
                 textToolbar = textToolbar,
+                onInputSession = { imeSession.onInputSession(it) },
+                isWindowTransparent = fullyTransparent,
             )
-        scene =
+        sceneBundle =
             if (nativePopupLayers) {
                 // Opt-in path: every Popup becomes a Tao popup window owned by
                 // this window (override-redirect on X11, wl_subsurface on
                 // Wayland), so popup content can extend beyond — and float
                 // independently of — the window bounds.
-                PlatformLayersComposeScene(
+                platformLayersSceneBundle(
+                    coroutineContext = coroutineContext + flushingDispatcher,
                     density = Density(scale),
                     layoutDirection = GlobalLayoutDirection,
-                    coroutineContext = coroutineContext + frameClock + flushingDispatcher,
                     composeSceneContext =
                         TaoComposeSceneContext(
                             platformContext = platformContext,
-                        ) { density, layoutDirection, focusable, cc ->
+                        ) { density, layoutDirection, focusable, consumeOutside ->
                             TaoPopupSceneLayerLinux(
                                 host = popupHost(),
                                 initialDensity = density,
                                 initialLayoutDirection = layoutDirection,
                                 initialFocusable = focusable,
-                                parentCompositionContext = cc,
+                                initialConsumePointerInputOutside = consumeOutside,
                             )
                         },
-                    invalidate = {
-                        requestRedrawCoalesced()
-                    },
-                ).apply { compositionLocalContext = pendingCompositionLocalContext }
+                    requestFrame = { requestRedrawCoalesced() },
+                )
             } else {
                 // Default: Compose Popup / DropdownMenu / Tooltip content stays
                 // in the same EGL render target as the rest of the UI.
-                CanvasLayersComposeScene(
+                canvasLayersSceneBundle(
+                    coroutineContext = coroutineContext + flushingDispatcher,
                     density = Density(scale),
                     layoutDirection = GlobalLayoutDirection,
-                    coroutineContext = coroutineContext + frameClock + flushingDispatcher,
                     platformContext = platformContext,
-                    invalidate = {
-                        requestRedrawCoalesced()
-                    },
-                ).apply { compositionLocalContext = pendingCompositionLocalContext }
+                    requestFrame = { requestRedrawCoalesced() },
+                )
             }
+        scene?.compositionLocalContext = pendingCompositionLocalContext
+        // Frame failures (recomposition / layout / draw) are caught inside the
+        // bundle, the single seam all three platforms render through.
+        sceneBundle?.exceptionHandler = exceptionHandler
 
         // Notify popup layers when the host window moves on screen — X11
         // popups are positioned in root coordinates and don't auto-track.
@@ -869,60 +920,67 @@ internal class TaoComposeSceneHostLinux(
             ysFixed: LongArray,
             pressedMask: Long,
         ) {
-            val sc = scene ?: return
-            if (count <= 0) return
+            // Touch runs user pointer-input code exactly like the mouse path,
+            // but this bridge calls back outside `EventDispatcher.guarded`, so
+            // both of the mouse wire's layers are reproduced by the guard: the
+            // window's handler gets the first look, and a rethrow takes the
+            // fatal path instead of unwinding into the JNI callback frame.
+            guardBridgeCallback {
+                val sc = scene ?: return
+                if (count <= 0) return
 
-            // Single-finger press in the resize edge band starts a native resize
-            // drag — mirrors the mouse path in [onPointerButton]. The press is
-            // consumed (never forwarded to Compose) so the compositor owns the
-            // whole sequence, exactly like the mouse-driven resize. Positions are
-            // physical px (`/ TOUCH_POSITION_SCALE`), matching what
-            // [currentResizeDirection] expects. `begin_resize_drag` works during a
-            // touch grab the same way `begin_move_drag` does for title-bar touch
-            // drag (see the compositor pointer-grab note in [onNativeWindowDragStarted]).
-            if (eventType == TaoTouchEvent.PRESS && count == 1) {
-                val direction =
-                    currentResizeDirection(
-                        xsFixed[0] / TOUCH_POSITION_SCALE,
-                        ysFixed[0] / TOUCH_POSITION_SCALE,
-                        forTouch = true,
+                // Single-finger press in the resize edge band starts a native resize
+                // drag — mirrors the mouse path in [onPointerButton]. The press is
+                // consumed (never forwarded to Compose) so the compositor owns the
+                // whole sequence, exactly like the mouse-driven resize. Positions are
+                // physical px (`/ TOUCH_POSITION_SCALE`), matching what
+                // [currentResizeDirection] expects. `begin_resize_drag` works during a
+                // touch grab the same way `begin_move_drag` does for title-bar touch
+                // drag (see the compositor pointer-grab note in [onNativeWindowDragStarted]).
+                if (eventType == TaoTouchEvent.PRESS && count == 1) {
+                    val direction =
+                        currentResizeDirection(
+                            xsFixed[0] / TOUCH_POSITION_SCALE,
+                            ysFixed[0] / TOUCH_POSITION_SCALE,
+                            forTouch = true,
+                        )
+                    if (resizeDecoration.onLeftPress(direction)) {
+                        compositorDragActive = true
+                        return
+                    }
+                }
+
+                val pointers = ArrayList<ComposeScenePointer>(count)
+                for (i in 0 until count) {
+                    val pressed = (pressedMask and (1L shl i)) != 0L
+                    pointers.add(
+                        ComposeScenePointer(
+                            id = PointerId(ids[i]),
+                            position =
+                                Offset(
+                                    xsFixed[i] / TOUCH_POSITION_SCALE,
+                                    ysFixed[i] / TOUCH_POSITION_SCALE,
+                                ),
+                            pressed = pressed,
+                            type = PointerType.Touch,
+                        ),
                     )
-                if (resizeDecoration.onLeftPress(direction)) {
-                    compositorDragActive = true
-                    return
                 }
-            }
-
-            val pointers = ArrayList<ComposeScenePointer>(count)
-            for (i in 0 until count) {
-                val pressed = (pressedMask and (1L shl i)) != 0L
-                pointers.add(
-                    ComposeScenePointer(
-                        id = PointerId(ids[i]),
-                        position =
-                            Offset(
-                                xsFixed[i] / TOUCH_POSITION_SCALE,
-                                ysFixed[i] / TOUCH_POSITION_SCALE,
-                            ),
-                        pressed = pressed,
-                        type = PointerType.Touch,
-                    ),
+                val composeType =
+                    when (eventType) {
+                        TaoTouchEvent.PRESS -> PointerEventType.Press
+                        TaoTouchEvent.MOVE -> PointerEventType.Move
+                        TaoTouchEvent.RELEASE, TaoTouchEvent.CANCEL -> PointerEventType.Release
+                        else -> return
+                    }
+                sc.sendPointerEvent(
+                    eventType = composeType,
+                    pointers = pointers,
+                    keyboardModifiers = currentKeyboardModifiers,
                 )
-            }
-            val composeType =
-                when (eventType) {
-                    TaoTouchEvent.PRESS -> PointerEventType.Press
-                    TaoTouchEvent.MOVE -> PointerEventType.Move
-                    TaoTouchEvent.RELEASE, TaoTouchEvent.CANCEL -> PointerEventType.Release
-                    else -> return
+                if (eventType == TaoTouchEvent.CANCEL) {
+                    sc.cancelPointerInput()
                 }
-            sc.sendPointerEvent(
-                eventType = composeType,
-                pointers = pointers,
-                keyboardModifiers = currentKeyboardModifiers,
-            )
-            if (eventType == TaoTouchEvent.CANCEL) {
-                sc.cancelPointerInput()
             }
         }
 
@@ -934,7 +992,20 @@ internal class TaoComposeSceneHostLinux(
             yFixed: Long,
             valueFixed: Long,
         ) {
-            dispatchTrackpadGesture(kind, phase, xFixed, yFixed, valueFixed)
+            guardBridgeCallback { dispatchTrackpadGesture(kind, phase, xFixed, yFixed, valueFixed) }
+        }
+
+        // The native bridge invokes these callbacks directly from its JNI
+        // thread, outside `EventDispatcher.guarded`, so reproduce the mouse
+        // wire's two layers here: the window's handler first, then the fatal
+        // path for anything it rethrows.
+        @Suppress("TooGenericExceptionCaught") // a rethrowing handler may throw anything
+        private inline fun guardBridgeCallback(block: () -> Unit) {
+            try {
+                exceptionHandler.catchExceptions(block)
+            } catch (t: Throwable) {
+                TaoApplication.reportFatal(t)
+            }
         }
     }
 
@@ -950,7 +1021,10 @@ internal class TaoComposeSceneHostLinux(
 
     // Ctrl+wheel is a discrete stream with no ENDED phase (unlike a native trackpad
     // gesture), so the synthetic magnify is released by an idle timer on this scope.
-    private val gestureScope = CoroutineScope(coroutineContext + flushingDispatcher + SupervisorJob())
+    // Deliberately NOT on the #622 fatal path: gesture helpers are isolated
+    // (SupervisorJob) — a crash there costs one gesture, logged at SEVERE.
+    private val gestureScope =
+        CoroutineScope(coroutineContext + flushingDispatcher + SupervisorJob() + TaoNonFatalCoroutineExceptionHandler)
     private var wheelZoomEndJob: Job? = null
 
     @OptIn(ExperimentalComposeUiApi::class)
@@ -1066,21 +1140,30 @@ internal class TaoComposeSceneHostLinux(
         requestRedrawCoalesced()
     }
 
-    fun setContent(content: @Composable () -> Unit) {
-        scene?.setContent {
-            // Capture the standard FocusManager from the composition
-            // so the overlay controller can call `clearFocus(force =
-            // true)` to break a `BasicTextField`'s "Captured" focus
-            // state when a context menu dismisses (the scene-level
-            // `releaseFocus()` only clears Active/ActiveParent and
-            // leaves the caret visible).
-            val fm = androidx.compose.ui.platform.LocalFocusManager.current
-            androidx.compose.runtime.SideEffect {
-                capturedFocusManager = fm
+    // Guarded like AWT's `ComposeSceneMediator.setContent`: the first
+    // composition runs inside this call, so content that throws while mounting
+    // must reach the window's handler instead of unwinding into the Tao loop.
+    fun setContent(content: @Composable () -> Unit) =
+        exceptionHandler.catchExceptions {
+            scene?.setContent {
+                // Capture the standard FocusManager from the composition
+                // so the overlay controller can call `clearFocus(force =
+                // true)` to break a `BasicTextField`'s "Captured" focus
+                // state when a context menu dismisses (the scene-level
+                // `releaseFocus()` only clears Active/ActiveParent and
+                // leaves the caret visible).
+                val fm = androidx.compose.ui.platform.LocalFocusManager.current
+                androidx.compose.runtime.SideEffect {
+                    capturedFocusManager = fm
+                }
+                // GTK clipboard instead of AWT's X11-only one: the window lives on
+                // whichever GDK backend the session provides, and on Wayland the
+                // two selections are not the same one (issue #582).
+                ProvideTaoClipboard {
+                    TaoTextToolbarHost(textToolbar, content)
+                }
             }
-            TaoTextToolbarHost(textToolbar, content)
         }
-    }
 
     /**
      * Forwards a parent composition's locals into this scene via
@@ -1430,27 +1513,30 @@ internal class TaoComposeSceneHostLinux(
         skipDrainBudget = SKIP_DRAIN_BUDGET_PER_FRAME
 
         val ctx = directContext ?: return
-        val sc = scene ?: return
+        val bundle = sceneBundle ?: return
         if (widthPx <= 0 || heightPx <= 0) return
 
         val now = System.nanoTime()
 
-        // Same frame-clock ordering as the Windows path: tick before render so
-        // `withFrameNanos`-driven animations apply on the current frame instead
-        // of lagging by one.
-        flushingDispatcher.drain()
-        frameClock.sendFrame(now)
+        // Drain queued main-thread work before the frame. The scene's frame
+        // clock is ticked inside `bundle.render` (FrameRecomposer.performFrame),
+        // so `withFrameNanos`-driven animations apply on the current frame
+        // instead of lagging by one — same guarantee as before, now atomic with
+        // the recompose → layout → draw the render call performs.
         flushingDispatcher.drain()
 
         NativeTaoEglBridge.nativeMakeCurrent(attachmentHandle)
+        // An embedded NativeView's GPU compositor ran GL on this thread since
+        // the last frame — drop Skia's cached GL state before any GPU work.
+        if (foreignGlInterop) ctx.resetGLAll()
         // Coalesced size/scale change is committed here, after the GL context
         // is current — applyPendingNativeResize closes the stale Skia cache.
         applyPendingNativeResize()
         updateResizeBurstSwapInterval()
 
         val paintSize = resolvePaintSize()
-        if (sc.size != paintSize) {
-            sc.size = paintSize
+        if (bundle.scene.size != paintSize) {
+            bundle.scene.size = paintSize
             lastSceneSizeUpdateNs = now
         }
 
@@ -1463,8 +1549,21 @@ internal class TaoComposeSceneHostLinux(
         // a transparent clear. The rounded corners are carved back to
         // transparent by [applyFrameDecoration] below.
         surface.canvas.clear(clearColorArgbState.value)
-        sc.render(surface.canvas.asComposeCanvas(), now)
+        bundle.render(surface.canvas, now)
+        // bundle.render runs composition effects: an embed's WebKit can do
+        // GL right here (webkit_web_view_load_uri in update{}, realize on
+        // mount) and leave ITS EGL context current on this thread. All the
+        // GL Skia issues below — the whole frame's flush, including the new
+        // tab's glyph-atlas uploads — would then land in the foreign
+        // context: those atlas entries stay blank forever and text renders
+        // with randomly missing glyphs (Mutter+NVIDIA, #NativeView). Re-bind
+        // before any GPU work.
+        if (foreignGlInterop) {
+            NativeTaoEglBridge.nativeMakeCurrent(attachmentHandle)
+            ctx.resetGLAll()
+        }
         applyFrameDecoration(surface.canvas, paintSize.width, paintSize.height)
+
         surface.flushAndSubmit(syncCpu = false)
         NativeTaoEglBridge.nativeReleaseCurrent(attachmentHandle)
         swapThread?.requestSwap()
@@ -1663,9 +1762,10 @@ internal class TaoComposeSceneHostLinux(
         val direction = if (pressedButtons.isEmpty()) currentResizeDirection(xPx, yPx) else null
         if (resizeDecoration.onMove(direction)) return
 
+        if (!pointerDeadband.shouldDispatchMove(xPx, yPx, scale)) return
         scene?.sendPointerEvent(
             eventType = PointerEventType.Move,
-            position = Offset(xPx, yPx),
+            position = Offset(pointerDeadband.x, pointerDeadband.y),
             type = PointerType.Mouse,
             keyboardModifiers = currentKeyboardModifiers,
         )
@@ -1757,7 +1857,7 @@ internal class TaoComposeSceneHostLinux(
         windowInfo.keyboardModifiers = currentKeyboardModifiers
         scene?.sendPointerEvent(
             eventType = if (pressed) PointerEventType.Press else PointerEventType.Release,
-            position = Offset(lastPointerX, lastPointerY),
+            position = Offset(pointerDeadband.x, pointerDeadband.y),
             type = PointerType.Mouse,
             keyboardModifiers = currentKeyboardModifiers,
             button = mapButton(buttonCode),
@@ -1824,19 +1924,11 @@ internal class TaoComposeSceneHostLinux(
             return
         }
 
-        scene?.sendPointerEvent(
-            eventType = PointerEventType.Scroll,
-            position = Offset(lastPointerX, lastPointerY),
-            scrollDelta = Offset(event.dxAwt, event.dyAwt),
-            type = PointerType.Mouse,
+        scene?.dispatchAwtShapedScroll(
+            x = pointerDeadband.x,
+            y = pointerDeadband.y,
+            event = event,
             keyboardModifiers = currentKeyboardModifiers,
-            nativeEvent =
-                TaoSyntheticMouseWheelEvent.create(
-                    event = event,
-                    x = lastPointerX,
-                    y = lastPointerY,
-                    keyboardModifiers = currentKeyboardModifiers,
-                ),
         )
     }
 
@@ -1930,6 +2022,8 @@ internal class TaoComposeSceneHostLinux(
         return object : TaoPopupHostLinux {
             override val parentWindow: TaoWindow get() = outer.window
             override val scale: Float get() = outer.scale
+            override val exceptionHandler: WindowExceptionHandler?
+                get() = outer.exceptionHandler
             override val parentWindowSize: IntSize get() = IntSize(outer.widthPx, outer.heightPx)
             override val workAreaSize: IntSize get() =
                 NativeTaoBridge
@@ -1961,7 +2055,7 @@ internal class TaoComposeSceneHostLinux(
             override val coordinateOffset: IntOffset get() = IntOffset.Zero
 
             override val sceneCoroutineContext: CoroutineContext
-                get() = outer.coroutineContext + outer.frameClock + outer.flushingDispatcher
+                get() = outer.coroutineContext + outer.flushingDispatcher
 
             override fun requestRedraw() = outer.requestRedrawCoalesced()
 
@@ -2031,9 +2125,13 @@ internal class TaoComposeSceneHostLinux(
         if (gtkWindow == 0L) return null
         val outer = this
         return object : dev.nucleusframework.window.tao.TaoNativeViewHost {
-            override fun attach(childHandle: Long) {
+            override fun attach(
+                childHandle: Long,
+                regionToken: Any,
+            ) {
                 dev.nucleusframework.window.tao.ffi.NativeTaoLinuxWidgetBridge
                     .nativeAttach(gtkWindow, childHandle)
+                outer.foreignGlInterop = true
                 if (childHandle != 0L && outer.attachedNativeViews.add(childHandle)) {
                     // Force a re-push: lastOpaqueRegion may still hold the full
                     // opaque key from before the embed existed.
@@ -2042,7 +2140,12 @@ internal class TaoComposeSceneHostLinux(
                 }
             }
 
-            override fun detach(childHandle: Long) {
+            override fun detach(
+                childHandle: Long,
+                regionToken: Any,
+            ) {
+                outer.nativeViewRects.remove(childHandle)
+                outer.overlayController.unregisterRegion(regionToken)
                 dev.nucleusframework.window.tao.ffi.NativeTaoLinuxWidgetBridge
                     .nativeDetach(childHandle)
                 if (childHandle != 0L && outer.attachedNativeViews.remove(childHandle)) {
@@ -2057,6 +2160,7 @@ internal class TaoComposeSceneHostLinux(
                 yPx: Int,
                 widthPx: Int,
                 heightPx: Int,
+                regionToken: Any,
             ) {
                 // Compose feeds physical pixels; GTK 3 lays out in
                 // logical pixels (the compositor applies the device
@@ -2068,6 +2172,11 @@ internal class TaoComposeSceneHostLinux(
                 val hLogical = (heightPx / s).toInt().coerceAtLeast(1)
                 dev.nucleusframework.window.tao.ffi.NativeTaoLinuxWidgetBridge
                     .nativeSetFrame(gtkWindow, handle, xLogical, yLogical, wLogical, hLogical)
+                // Capture the whole NativeView rect in a GtkEventBox so
+                // Compose sees hits first (siblings / content slot);
+                // unconsumed events are synthesised back onto the widget.
+                outer.nativeViewRects[handle] = intArrayOf(xPx, yPx, widthPx, heightPx)
+                outer.overlayController.registerRegion(regionToken, xPx, yPx, widthPx, heightPx)
             }
 
             override fun setCornerRadius(
@@ -2081,19 +2190,44 @@ internal class TaoComposeSceneHostLinux(
                 // on Linux fall back to drawing a Compose
                 // RoundedCornerShape on top of the widget area.
             }
+
+            override fun dispatchPointerToNative(
+                handle: Long,
+                type: Int,
+                xPx: Float,
+                yPx: Float,
+                button: Int,
+                pressed: Boolean,
+            ) {
+                val s = if (outer.scale > 0f) outer.scale else 1f
+                val rect = outer.nativeViewRects[handle]
+                val xLogical = ((xPx - (rect?.get(0)?.toFloat() ?: 0f)) / s).toInt()
+                val yLogical = ((yPx - (rect?.get(1)?.toFloat() ?: 0f)) / s).toInt()
+                dev.nucleusframework.window.tao.ffi.NativeTaoLinuxWidgetBridge
+                    .nativeDispatchPointer(handle, type, xLogical, yLogical, button, pressed)
+            }
+
+            override fun dispatchScrollToNative(
+                handle: Long,
+                xPx: Float,
+                yPx: Float,
+                dx: Float,
+                dy: Float,
+            ) {
+                val s = if (outer.scale > 0f) outer.scale else 1f
+                val rect = outer.nativeViewRects[handle]
+                val xLogical = ((xPx - (rect?.get(0)?.toFloat() ?: 0f)) / s).toInt()
+                val yLogical = ((yPx - (rect?.get(1)?.toFloat() ?: 0f)) / s).toInt()
+                dev.nucleusframework.window.tao.ffi.NativeTaoLinuxWidgetBridge
+                    .nativeDispatchScroll(handle, xLogical, yLogical, dx, dy)
+            }
         }
     }
 
     /**
-     * Plumbing for the overlay slot of `NativeView` on Linux. Returns
-     * a freshly-created controller bound to this host's EGL
-     * attachment so [dev.nucleusframework.window.tao.consumeOverlayPointerEvents]
-     * modifiers in the `content` lambda can register their bounds and
-     * have the EGL surface's input region updated accordingly.
-     *
-     * One controller per window — multiple `NativeView`s inside the
-     * same window share its rect set, which is fine because input
-     * region is a window-level single list.
+     * GtkEventBox capture for NativeView rects. The EGL subsurface is
+     * input-transparent; each NativeView registers its bounds so Compose
+     * sees hits first. One controller per window.
      */
     private val overlayController: TaoLinuxOverlayControllerImpl =
         TaoLinuxOverlayControllerImpl(
@@ -2119,6 +2253,15 @@ internal class TaoComposeSceneHostLinux(
             },
             buttonDispatcher = { button, pressed ->
                 onPointerButton(button, pressed)
+            },
+            scrollDispatcher = { xPx, yPx, dx, dy ->
+                // Route the position through the regular move dispatch so the
+                // sub-pixel deadband tracks it — the scroll then lands at the
+                // deadband position like every other scene event (#615).
+                onPointerMove(xPx * 1024, yPx * 1024)
+                onPointerScroll(
+                    TaoPointerScrollEvent(dxAwt = dx, dyAwt = dy, scrollAmount = 1),
+                )
             },
             focusReleaseDispatcher = {
                 // 1) Deselect the currently-focused widget (e.g. the
@@ -2174,6 +2317,9 @@ internal class TaoComposeSceneHostLinux(
     }
 
     fun detach() {
+        window.imePreedit = null
+        window.imeCommit = null
+        imeSession.onInputSession(null)
         shutdownA11yScheduler()
         textToolbar.hide()
         if (dev.nucleusframework.window.tao.ffi.NativeTaoLinuxDndBridge.isLoaded &&
@@ -2200,8 +2346,8 @@ internal class TaoComposeSceneHostLinux(
         // to free its Skia resources — leaving that context current. The
         // host re-bind below must come after so the host's GPU releases land
         // on the right context.
-        scene?.close()
-        scene = null
+        sceneBundle?.close()
+        sceneBundle = null
 
         // Re-bind THIS window's EGL context before tearing down Skia. The
         // GPU-resource releases that follow (glDeleteFramebuffers /
@@ -2444,11 +2590,22 @@ internal class TaoComposeSceneHostLinux(
 private class LinuxTaoPlatformContext(
     private val windowHandle: Long,
     private val topInsetPx: () -> Int,
+    /** Live px-per-dp factor of the owning scene — see [TaoPlatformContextBase.sceneScale]. */
+    private val scaleProvider: () -> Float,
     override val windowInfo: androidx.compose.ui.platform.WindowInfo,
     override val semanticsOwnerListener: androidx.compose.ui.platform.PlatformContext.SemanticsOwnerListener?,
     override val dragAndDropManager: androidx.compose.ui.platform.PlatformDragAndDropManager,
     override val textToolbar: androidx.compose.ui.platform.TextToolbar,
-) : androidx.compose.ui.platform.PlatformContext.Empty() {
+    /** Publishes the active text-input session to the host's [TaoImeSession] (#558). */
+    private val onInputSession: (androidx.compose.ui.platform.PlatformTextInputMethodRequest?) -> Unit = {},
+    // #559: forwarded to Compose so `CanvasLayersComposeScene` picks the
+    // alpha-aware dialog-scrim blend mode (`BlendMode.SrcAtop`) on windows
+    // created with `transparent = true` — same as Compose Desktop's
+    // `DesktopPlatformContext` forwarding `windowContext.isWindowTransparent`.
+    override val isWindowTransparent: Boolean,
+) : TaoPlatformContextBase() {
+    override val sceneScale: Float get() = scaleProvider()
+
     override val windowInsets: androidx.compose.ui.platform.PlatformWindowInsets =
         object : androidx.compose.ui.platform.PlatformWindowInsets {
             override val systemBars: androidx.compose.ui.platform.PlatformInsets =
@@ -2456,6 +2613,45 @@ private class LinuxTaoPlatformContext(
                     .PlatformInsets(getTop = topInsetPx)
             override val captionBar: androidx.compose.ui.platform.PlatformInsets get() = systemBars
         }
+
+    /**
+     * Keeps the GTK input context anchored to the caret for as long as a field
+     * owns the input (#558).
+     *
+     * The macOS twin also has to activate the view's `NSTextInputContext`
+     * first; GTK needs no such step, because the context is created with — and
+     * follows the focus of — the window itself. So this only mirrors the caret
+     * rect, through the same `nativeSetImeRect` contract Windows uses.
+     */
+    @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+    override suspend fun startInputMethod(
+        request: androidx.compose.ui.platform.PlatformTextInputMethodRequest,
+    ): Nothing {
+        onInputSession(request)
+        try {
+            coroutineScope {
+                launch {
+                    androidx.compose.runtime
+                        .snapshotFlow {
+                            request.focusedRectInRoot()
+                        }.collect { rect ->
+                            if (rect != null) {
+                                NativeTaoBridge.nativeSetImeRect(
+                                    windowHandle,
+                                    rect.left.toInt(),
+                                    rect.top.toInt(),
+                                    rect.width.toInt().coerceAtLeast(1),
+                                    rect.height.toInt().coerceAtLeast(1),
+                                )
+                            }
+                        }
+                }
+                awaitCancellation()
+            }
+        } finally {
+            onInputSession(null)
+        }
+    }
 
     override fun setPointerIcon(pointerIcon: androidx.compose.ui.input.pointer.PointerIcon) {
         // The Rust side maps the code to a freedesktop cursor name and goes

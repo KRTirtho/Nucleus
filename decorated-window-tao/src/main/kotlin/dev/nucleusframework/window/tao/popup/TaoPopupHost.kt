@@ -2,19 +2,22 @@ package dev.nucleusframework.window.tao.popup
 
 import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.window.WindowExceptionHandler
 import dev.nucleusframework.window.tao.scene.TaoRecordedSurface
 import kotlin.coroutines.CoroutineContext
 
 /**
  * Plumbing the popup / overlay scenes need from their host scene.
  * Implemented by [TaoComposeSceneHost], consumed by [TaoPopupSceneLayer]
- * and `NativeViewOverlayController`.
+ * and native popup layers.
  *
  * Threading: every call must run on the macOS main thread.
  */
+@OptIn(ExperimentalComposeUiApi::class)
 internal interface TaoPopupHost {
     /** NSView pointer of the host window's content view. */
     val parentNsView: Long
@@ -52,6 +55,14 @@ internal interface TaoPopupHost {
     val sceneCoroutineContext: CoroutineContext
 
     /**
+     * The owner window's exception handler, so a popup scene reports failures
+     * through the same channel as the window it belongs to. Mirrors Compose
+     * Desktop's `WindowComposeSceneLayer`, which forwards
+     * `composeContainer.exceptionHandler` into its own mediator.
+     */
+    val exceptionHandler: WindowExceptionHandler? get() = null
+
+    /**
      * Offset added to a popup's `boundsInWindow` before positioning the
      * NSPanel in the host NSWindow. Non-zero when the popup originates
      * from a nested scene (e.g. `NativeView`'s overlay) whose origin is
@@ -60,6 +71,15 @@ internal interface TaoPopupHost {
      * window coords and end up at the wrong place.
      */
     val coordinateOffset: IntOffset get() = IntOffset.Zero
+
+    /**
+     * Whether the owner window was created per-pixel transparent
+     * (`DecoratedWindow(transparent = true)`, #416). Overlay scenes render
+     * inside the owner's surface, so they forward this as
+     * `PlatformContext.isWindowTransparent` — the hint Compose uses to pick
+     * the alpha-aware dialog-scrim blend mode (#559).
+     */
+    val isOwnerWindowTransparent: Boolean get() = false
 
     fun requestRedraw()
 

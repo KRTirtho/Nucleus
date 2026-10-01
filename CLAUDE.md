@@ -1,26 +1,43 @@
-# ComposeDeskKit (Nucleus)
+# Nucleus
 
 A multi-module Gradle plugin and runtime library toolkit for shipping production-ready JVM desktop applications on macOS, Windows, and Linux.
 
+Published releases are `2.4.x` (latest tag `v2.4.4`). Do not treat `IDEAL_API.md` as current — that file is gone; the real entry point is `nucleusApplication(args) { }` in `nucleus-application`. Plugin-injected strings are `NucleusApp`, not a generated `NucleusGenerated` object.
+
 ## Project Structure
 
+- `nucleus-application` - `nucleusApplication`, backend-agnostic `DecoratedWindow` / `HostedWindow`, `onDeepLink`, `aotTraining`
 - `core-runtime` - Executable type detection, single instance, deep links, platform detection, app metadata (`NucleusApp`)
 - `aot-runtime` - AOT cache mode detection for JDK 25+ (Project Leyden)
-- `updater-runtime` - Auto-update engine (GitHub/S3), SHA-512 verification, progress tracking, update level detection, post-update events
+- `updater-runtime` - Auto-update engine (GitHub/S3), SHA-512, delta/blockmap, progress, update level, post-update events
 - `freedesktop-icons` - Type-safe freedesktop Icon Naming Specification constants (shared by notification-linux and launcher-linux)
+- `sf-symbols` - Type-safe SF Symbols catalog
+- `notification-common` - Cross-platform notification DSL with per-platform option blocks
+- `notification-macos` - macOS User Notifications
 - `notification-linux` - Freedesktop Desktop Notifications API via JNI (D-Bus org.freedesktop.Notifications)
 - `notification-windows` - Windows Toast Notifications API via JNI (WinRT)
+- `launcher-macos` - macOS Dock API — badge, menus
 - `launcher-windows` - Windows Launcher API via JNI (WinRT/COM) — badge notifications, jump lists (ICustomDestinationList), overlay icons, and thumbnail toolbar buttons (ITaskbarList3) on taskbar
 - `launcher-linux` - Unity Launcher API via JNI (badge, progress, urgency, quicklist via com.canonical.Unity.LauncherEntry + com.canonical.dbusmenu)
+- `menu-macos` - Native macOS menu bar
+- `media-control` - OS media controls — MPRIS (Linux), Now Playing (macOS), SMTC (Windows)
+- `global-hotkey` - System-wide keyboard shortcuts
 - `taskbar-progress` - Native taskbar/dock progress bar and attention requests (Windows ITaskbarList3, macOS NSDockTile, Linux delegates to launcher-linux)
+- `taskbar-progress-tao` - Taskbar progress on the Tao backend
 - `darkmode-detector` - Reactive OS dark mode detection via JNI
 - `system-color` - Reactive system accent color and high contrast detection via JNI
+- `system-info` - CPU, memory, GPU, temperature, network, processes
 - `energy-manager` - Energy efficiency & screen-awake APIs
+- `autolaunch` - Start at login (Win32/MSIX/SMAppService/systemd/Flatpak portal)
+- `scheduler` / `scheduler-testing` - OS-scheduled background tasks (Task Scheduler / launchd / systemd) + test doubles
+- `fs-watcher` - Native filesystem watcher
+- `service-management-macos` - macOS `SMAppService` — login items, launch agents, daemons
 - `native-ssl` / `native-http` / `native-http-okhttp` / `native-http-ktor` - OS trust store integration
 - `linux-hidpi` - Native HiDPI scale detection on Linux
 - `graalvm-runtime` - GraalVM native-image bootstrap
 - `decorated-window-core` - Shared types, layout, styling (design-system agnostic)
 - `decorated-window-tao` - **Default/recommended backend** — no-AWT window shell over the Rust `tao` crate via JNI (Metal on macOS, EGL on Linux, ANGLE/GLES on Windows), single native event-loop thread as `Dispatchers.Main`
+- `decorated-window-awt` - AWT chrome shared by the JBR/JNI backends
 - `decorated-window-jbr` - JBR-based implementation (requires JetBrains Runtime) — **legacy/maintenance-only**
 - `decorated-window-jni` - JNI-based implementation (any JVM, GraalVM compatible) — **legacy/maintenance-only**
 - `decorated-window-jewel` - Jewel (IntelliJ theme) integration
@@ -28,7 +45,7 @@ A multi-module Gradle plugin and runtime library toolkit for shipping production
 - `decorated-window-material3` - Material 3 color mapping
 - `plugin-build/plugin` - Gradle plugin for packaging & distribution
 - `buildSrc` - Build-only convention plugins (`nucleus.native-module`: the shared `buildNative*` wiring for every JNI module)
-- `examples/` - Demo & sample applications (consolidated): `nucleus-demo` (flagship), `tao-demo`, `jni-demo`, `jewel-demo`, `cmp-demo` (KMP), `scheduler-demo`, `service-management-demo`, `system-info-demo`, `fs-watcher-smoke`, `extra-launcher-demo`, `benchmark-demo` (JIT-vs-GraalVM-O3 CPU benchmark suite, with SwiftUI + Tauri ports under `ports/`), `gstreamer-demo` (Linux: GStreamer video into a `TextureView`, needs its own `build.sh` and the GStreamer dev packages), `mediafoundation-demo` (Windows counterpart: Media Foundation/DXVA video into a `TextureView`, needs its own `build.bat`), `avfoundation-demo` (macOS counterpart: AVFoundation/VideoToolbox video into a `TextureView`, needs its own `build.sh`), plus `shared` (Compose helper used by tao/jni demos)
+- `examples/` - Demo & sample applications: `nucleus-demo` (flagship), `compose-demo`, `tao-demo`, `swing-tao-demo`, `jni-demo`, `jewel-demo`, `cmp-demo` (KMP), `window-scaffold-demo`, `zstd-demo`, `scheduler-demo`, `service-management-demo`, `system-info-demo`, `fs-watcher-smoke`, `orphan-reflect-smoke`, `extra-launcher-demo`, `tao-native-test` (GraalVM + SLF4J fixture), `benchmark-demo` (JIT-vs-GraalVM-O3, ports under `ports/`), `gstreamer-demo` / `mediafoundation-demo` / `avfoundation-demo` (platform video into a `TextureView`), plus `shared` (Compose helper used by tao/jni demos). `native-proxy` and `spellcheck` directories on disk are **not** on `main` — ignore them unless the matching feature branch is checked out.
 
 ## Build & Run
 
@@ -42,10 +59,10 @@ A multi-module Gradle plugin and runtime library toolkit for shipping production
 
 ## Key Technologies
 
-- Kotlin 2.3+ with Compose Desktop 1.10+
+- Kotlin 2.4 with Compose Desktop 1.11
 - JNI for all native interop (no JNA in runtime modules)
 - JBR (JetBrains Runtime) API for decorated-window-jbr
-- Gradle 9+ with version catalog (`gradle/libs.versions.toml`)
+- Gradle 9.4 with version catalog (`gradle/libs.versions.toml`)
 - Detekt + KtLint for code quality
 
 ## Development Notes
@@ -59,6 +76,7 @@ A multi-module Gradle plugin and runtime library toolkit for shipping production
 - **KDoc on public API**: `UndocumentedPublicClass` / `UndocumentedPublicFunction` are enforced by detekt (`detekt` is wired into `check` / `preMerge`). Pre-existing gaps are grandfathered in per-module `<module>/detekt-baseline.xml` files — any *new* undocumented public class or function fails the build. Do not regenerate a baseline to silence a new finding; write the KDoc. `UndocumentedPublicProperty` stays off because the generated icon/symbol catalogs (`sf-symbols`, `freedesktop-icons`) would swamp it
 - **Logging**: `java.util.logging` is the single facade for every runtime module — no SLF4J dependency forced on consumers, no raw `println` / `System.err` in `src/main`. Logger names must be the fully-qualified class name (or an explicit `dev.nucleusframework.*` string) so the whole framework sits under one JUL namespace. `allowNucleusRuntimeLogging = true` is an opt-in convenience that raises the `dev.nucleusframework` logger to `nucleusLoggingLevel` and attaches a colored console handler; apps that configure JUL themselves (`logging.properties`, `jul-to-slf4j`) leave it `false` and Nucleus never touches the JUL configuration
 - `decorated-window-tao` is the recommended backend for new projects (no AWT, native event-loop-driven, true Windows fullscreen, GraalVM native-image first-class). `decorated-window-jni` and `decorated-window-jbr` (the AWT-based backends) are legacy/maintenance-only
+- **macOS trackpad on Tao** (#652–#654): scroll deltas are AWT-shaped (`preciseWheelRotation`, no display scale). Trackpad gestures reach Compose as `PanStart` / `PanMove` / `PanEnd` (`panOffset` = AWT delta × 10 dp), wheel notches as `Scroll`; foundation's `Modifier.scrollable` handles both. Custom handlers that only listen for `PointerEventType.Scroll` must also handle Pan, or the app can set `-Dnucleus.tao.trackpadPanEvents=false` to get AWT-style `Scroll` for everything. Everything scroll-related enters the scene through `TaoSceneScrollRouter` (window + NSPanel popups); the phase wire (Rust `SCROLL_GESTURE_*`, `popup_panel.m`, `TaoScrollGesturePhase`) is guarded by `TaoScrollWireDriftTest`
 - macOS Liquid Glass enabled by default via `macOsSdkVersion = "26.0"` (vtool SDK patching)
 - The HotSpot GC is selected type-safely with `application { garbageCollector = GarbageCollector.Z }` (unset = JVM ergonomics). The flags are prepended to the launcher `.cfg` java-options and to the `run` task — before `jvmArgs`, so an explicit `-XX:+Use…GC` there still wins — and the AOT training run inherits them from the `.cfg`
 
@@ -87,7 +105,7 @@ Existing `build.sh`/`build.bat` scripts also clear the `NativeLibraryLoader` cac
 
 ## Publishing to Maven Local
 
-Version is resolved from `GITHUB_REF` env var in every `build.gradle.kts` (`refs/tags/v1.3.0-beta-07` → `1.3.0-beta-07`). Without it, defaults to `1.0.0`.
+Version is resolved from `GITHUB_REF` in every `build.gradle.kts` (`refs/tags/v2.4.4` → `2.4.4`). Without it, defaults to `1.0.0`.
 
 **Prerequisites:**
 - Use JDK 21 (`JAVA_HOME=/usr/lib/jvm/java-1.21.0-openjdk-amd64`) — Kotlin DSL script compiler crashes on JDK 25
@@ -97,17 +115,17 @@ Version is resolved from `GITHUB_REF` env var in every `build.gradle.kts` (`refs
 
 **Runtime libraries (main project):**
 ```bash
-GITHUB_REF=refs/tags/v1.3.0-beta-07 JAVA_HOME=/usr/lib/jvm/java-1.21.0-openjdk-amd64 \
-  ./gradlew -p /absolute/path/to/ComposeDeskKit publishToMavenLocal --no-configuration-cache
+GITHUB_REF=refs/tags/v2.4.4 JAVA_HOME=/usr/lib/jvm/java-1.21.0-openjdk-amd64 \
+  ./gradlew -p /absolute/path/to/Nucleus publishToMavenLocal --no-configuration-cache
 ```
 
 **Plugin (plugin-build):**
 ```bash
-GITHUB_REF=refs/tags/v1.3.0-beta-07 JAVA_HOME=/usr/lib/jvm/java-1.21.0-openjdk-amd64 \
-  ./gradlew -p /absolute/path/to/ComposeDeskKit/plugin-build :plugin:publishToMavenLocal --no-configuration-cache
+GITHUB_REF=refs/tags/v2.4.4 JAVA_HOME=/usr/lib/jvm/java-1.21.0-openjdk-amd64 \
+  ./gradlew -p /absolute/path/to/Nucleus/plugin-build :plugin:publishToMavenLocal --no-configuration-cache
 ```
 
-Version format: `1.3.0-beta-XX` (hyphen before number, e.g. `1.3.0-beta-07`).
+Published tags are `v2.4.x`. The `v` prefix is stripped for the Maven version.
 
 ## GraalVM Native Image
 
@@ -115,12 +133,14 @@ Version format: `1.3.0-beta-XX` (hyphen before number, e.g. `1.3.0-beta-07`).
     - **L1**: Generic cross-platform metadata shipped in `graalvm-runtime` JAR (`reachability-metadata.json` with ~300+ types)
     - **L2**: Oracle GraalVM Reachability Metadata Repository — auto-resolved for classpath deps (enabled by default, `metadataRepository {}` DSL)
     - **L3**: Platform-specific metadata (macOS/Windows/Linux) shipped inside the plugin JAR under `nucleus/graalvm/platform-metadata/`
+- GraalVM Deb/Rpm/Pacman packages honor `linux { afterInstall / afterRemove / beforeInstall / beforeRemove }` the same as JVM jpackage/electron-builder. User scripts are concatenated after Nucleus templates. electron-builder substitutes `${sanitizedProductName}` and `${executable}` only when those tokens are single-quoted (`'${sanitizedProductName}-daemon.service'`); double-quoted `"${sanitizedProductName}"` is left unsubstituted and systemd hooks silently no-op. Pacman `.INSTALL` `pre_remove` does not get deb-style `$1=upgrade`, so stop/disable the unit unconditionally and let after-install re-enable on upgrade.
+- `graalvm { headless = true }` is for daemons/CLIs: skips L3 AWT/Java2D platform metadata, skips always-on L1 packs (`jdk-awt`, `jdk-fonts`, `jdk-graphics2d`, Skiko/Compose/tray), skips copying companion GUI native libs (`libawt`, `libfontmanager`, Skiko, …), and bakes `-Djava.awt.headless=true`. Default `false` (GUI). Without this, JNI registration of AWT types makes `native-image` pull `libawt`/`libawt_xawt` even when app code never references `java.awt`.
 - `graalvm-runtime` auto-includes `.svg`, `.ttf`, `.otf`, `composeResources/*`, `nucleus/native/*`, and `META-INF/services/*` via `reachability-metadata.json` resource globs (the deprecated `-H:IncludeResources` option was dropped). The blanket `**/*.{svg,ttf,otf}` globs are a required catch-all for fonts/icons bundled inside **library** JARs (e.g. Jewel SVG icons) — those are not the app's own resources so `autoIncludeResources` doesn't cover them. They knowingly trigger native-image's advisory "pattern too generic" warning; do not remove them (it breaks Jewel icons in native image)
 - The tracing agent (`runWithNativeAgent`) is only needed for app-specific reflection, uncommon libraries, and resource bundles
 - PGO (Oracle GraalVM): `runWithPgoInstrument` builds + runs an instrumented image and records `graalvm/pgo/default.iprof` on exit; later native-image builds apply the profile automatically. Opt out with `-Pnucleus.graalvm.pgo=off`; customize via `graalvm { pgo { enabled / profile } }`
 - Agent output is automatically deduplicated against library metadata on the classpath
 - Sample apps have near-empty `reachability-metadata.json` — only app-specific entries remain
-- `GraalVmInitializer.initialize()` must be the first call in `main()` for native-image builds
+- `nucleusApplication` calls `GraalVmInitializer.initialize()` first. If you write a `main` that does not go through `nucleusApplication`, call `GraalVmInitializer.initialize()` yourself before anything else (required for native-image). Do not tell users to sequence GraalVM / single-instance / autolaunch / AUMID by hand — that bootstrap is already inside `nucleusApplication`. `Dispatchers.Main` on Tao is installed via `TaoMainDispatcherFactory` (ServiceLoader), not a manual `setMain`.
 - Font substitutions (`@TargetClass`) in `graalvm-runtime` fix `InternalError: platform encoding not initialized` on Windows/Linux
 - SLF4J is **not** initialized at build time — the API and the app-selected backend both initialize at run time, so the app keeps control of its provider, levels and environment-dependent config. Forcing `--initialize-at-build-time=org.slf4j` from a shared module breaks any run-time-initialized backend (SLF4J 2.x provider discovery parks Logback's `LogbackMDCAdapter`/`LoggerContext` in the image heap → build failure; adding backend classes one by one only exposes the next object). Apps with a fixed backend can opt in via `graalvm { buildArgs.add("--initialize-at-build-time=org.slf4j") }` — it trades a frozen provider and build-machine-captured config for a cheaper first log call. `examples/tao-native-test` bundles Logback + an `MDC` round-trip as the regression fixture
 - GraalVM task surface mirrors the JVM one: `runGraalvmNative` is the fast dev loop (forces quick-build `-Ob`, ignoring the configured `optimization`), while `createGraalvmNativeDistributable` / `runGraalvmNativeDistributable` / `packageGraalvmNativeDistributionForCurrentOS` build & run the full app folder with the configured optimization (mirror `createDistributable` / `runDistributable` / `packageDistributionForCurrentOS`). Quick vs distributable is detected from the invoked task name and tracked as a compile input, so switching re-compiles
@@ -129,4 +149,4 @@ Version format: `1.3.0-beta-XX` (hyphen before number, e.g. `1.3.0-beta-07`).
 - The GraalVM toolchain is auto-downloaded by default (`graalvm { toolchain { } }` DSL), but only when `graalvm { isEnabled = true }` and only when a native-image task actually runs — every provider is resolved in `doFirst`, so an IDE sync or `gradlew tasks` never pulls a JDK. Cached under `~/.gradle/nucleus/graalvm/`.
 - **Distribution defaults to GraalVM Community Edition** (`toolchain { distribution }`, GPLv2+CE, resolved from the `graalvm/graalvm-ce-builds` GitHub releases). `GraalvmDistribution.ORACLE` opts into Oracle GraalVM and logs a GFTC licensing warning — the GFTC forbids charging any fee associated with redistributing the Program, and the plugin ships GraalVM runtime libs (`libjvm`, `libawt`, …) next to the executable. In community mode the Oracle-only `runWithPgoInstrument` task is **not registered at all**; `-O3`, `--pgo` and `-H:AdvancedObfuscation` degrade to a warning. `examples/benchmark-demo` opts into ORACLE because `-O3`/PGO are its whole point.
 - Install dirs embed the distribution (`graalvm-community-jdk-*` vs `graalvm-jdk-*`), so a pre-existing Oracle download is never silently reused after the default flipped; a `GRAALVM_HOME` whose distribution disagrees with the DSL is ignored with a warning. The CI cache key includes the distribution too.
-- Channel/version: innovation by default (`25i2`), `channel = GraalvmChannel.LTS` or an explicit `version` ("25", "25.0.1"). On Intel macs (dropped by both distributions after 25.0.1) it falls back to Liberica NIK via the BellSoft API — only the JDK feature version carries over there (BellSoft ships the LTS line only, so Intel macs get NIK 25.0.x even on the innovation channel). `toolchain { autoDownload = false }` restores Gradle toolchain resolution via `javaLanguageVersion`/`jvmVendor`.
+- Channel/version: innovation by default (`25i3` / GraalVM 25.3.4.1), `channel = GraalvmChannel.LTS` or an explicit `version` ("25", "25.0.1"). On Intel macs (dropped by both distributions after 25.0.1) it falls back to Liberica NIK via the BellSoft API — only the JDK feature version carries over there (BellSoft ships the LTS line only, so Intel macs get NIK 25.0.x even on the innovation channel). `toolchain { autoDownload = false }` restores Gradle toolchain resolution via `javaLanguageVersion`/`jvmVendor`.

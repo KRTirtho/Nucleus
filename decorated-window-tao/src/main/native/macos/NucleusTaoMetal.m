@@ -22,6 +22,7 @@
 #import <stdatomic.h>
 #import <stdio.h>
 #include <stdint.h>
+#include <string.h>
 #include <math.h>
 #import <jni.h>
 
@@ -481,8 +482,14 @@ static void taoApplyWindowTransparencyMode(NSWindow *win, NSView *view, int mode
 // solution (matching JBR's AWTButtonsView) is to:
 //   1. Hide the AppKit titlebar container while in fullscreen,
 //   2. Install a custom NSView in the contentView containing 3 NSButtons
-//      created via [NSWindow standardWindowButton:forStyleMask:] — they look
-//      identical to the real traffic-lights and accept the standard actions.
+//      created via [NSWindow standardWindowButton:forStyleMask:].
+//
+// Copies built with the live fullscreen styleMask draw as inactive (gray)
+// because they are not the window's real title-bar widgets (issue #531).
+// At rest we therefore paint the standard active traffic-light colours
+// ourselves; on group hover we reveal the native close/zoom widgets (so the
+// glyphs match AppKit) and keep miniaturise hidden — performMiniaturize: is
+// a no-op in fullscreen, so the button is disabled rather than dead.
 
 // Neutralizes the NSToolbarFullScreenWindow overlay AppKit creates lazily in
 // fullscreen (despite its name it hosts the re-parented native title bar, so
@@ -509,12 +516,45 @@ static void neutralizeToolbarFullScreenWindows(void) {
     }
 }
 
+// Standard Big Sur+ traffic-light sRGB fills. Used for the rest-state
+// placeholders: copies of _NSThemeWidget draw inactive-gray when they are
+// not the window's real title-bar buttons (issue #531).
+static NSColor *taoTrafficCloseColor(void) {
+    return [NSColor colorWithSRGBRed:1.0 green:95.0 / 255.0 blue:87.0 / 255.0 alpha:1.0];
+}
+static NSColor *taoTrafficZoomColor(void) {
+    return [NSColor colorWithSRGBRed:40.0 / 255.0 green:200.0 / 255.0 blue:64.0 / 255.0 alpha:1.0];
+}
+static NSColor *taoTrafficDisabledColor(NSView *view) {
+    BOOL dark = NO;
+    if (@available(macOS 10.14, *)) {
+        NSAppearanceName name = [view.effectiveAppearance
+            bestMatchFromAppearancesWithNames:@[ NSAppearanceNameDarkAqua, NSAppearanceNameAqua ]];
+        dark = [name isEqualToString:NSAppearanceNameDarkAqua];
+    }
+    return dark ? [NSColor colorWithWhite:0.40 alpha:1.0]
+                : [NSColor colorWithWhite:0.80 alpha:1.0];
+}
+
+static void taoFillTrafficCircle(NSView *button, NSColor *color) {
+    NSRect r = button.frame;
+    CGFloat d = fmin(MIN(r.size.width, r.size.height),
+                     isTahoeOrLater() ? 14.0 : 12.0);
+    NSRect oval = NSMakeRect(NSMidX(r) - d / 2.0, NSMidY(r) - d / 2.0, d, d);
+    [color setFill];
+    [[NSBezierPath bezierPathWithOvalInRect:oval] fill];
+}
+
 @interface NucleusTaoButtonsView : NSView {
     BOOL _mouseInside;
 }
+- (void)applyHoverState;
 @end
 
 @implementation NucleusTaoButtonsView
+- (BOOL)isOpaque {
+    return NO;
+}
 - (void)updateTrackingAreas {
     [super updateTrackingAreas];
     for (NSTrackingArea *ta in self.trackingAreas) {
@@ -529,30 +569,51 @@ static void neutralizeToolbarFullScreenWindows(void) {
             userInfo:nil];
     [self addTrackingArea:ta];
 }
-// The buttons only repaint their glyphs when explicitly invalidated: they
-// query _mouseInGroup: at draw time. Synthesizing mouseEntered:/mouseExited:
-// on the buttons instead leaves _NSThemeWidget in an inconsistent hover
-// state on pre-Tahoe macOS — only the zoom button repainted, and its glyph
-// never cleared on exit (issue #310 B1).
-- (void)setButtonsNeedDisplay {
-    for (NSView *btn in self.subviews) [btn setNeedsDisplay:YES];
+// Rest: hide the native copies and paint active-coloured circles (miniaturise
+// stays the disabled gray). Hover: reveal native close/zoom so AppKit draws
+// the glyphs; miniaturise stays hidden because it cannot work in fullscreen.
+- (void)applyHoverState {
+    NSArray<NSView *> *buttons = self.subviews;
+    if (buttons.count < 3) return;
+    NSButton *closeBtn = (NSButton *)buttons[0];
+    NSButton *minBtn = (NSButton *)buttons[1];
+    NSButton *zoomBtn = (NSButton *)buttons[2];
+    minBtn.enabled = NO;
+    minBtn.hidden = YES;
+    closeBtn.hidden = !_mouseInside;
+    zoomBtn.hidden = !_mouseInside;
+    [closeBtn setHighlighted:_mouseInside];
+    [zoomBtn setHighlighted:_mouseInside];
+    [self setNeedsDisplay:YES];
 }
 - (void)mouseEntered:(NSEvent *)event {
     (void)event;
     _mouseInside = YES;
-    [self setButtonsNeedDisplay];
+    [self applyHoverState];
 }
 - (void)mouseExited:(NSEvent *)event {
     (void)event;
     _mouseInside = NO;
-    [self setButtonsNeedDisplay];
+    [self applyHoverState];
+}
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    NSArray<NSView *> *buttons = self.subviews;
+    if (buttons.count < 3) return;
+    if (!_mouseInside) {
+        taoFillTrafficCircle(buttons[0], taoTrafficCloseColor());
+        taoFillTrafficCircle(buttons[1], taoTrafficDisabledColor(self));
+        taoFillTrafficCircle(buttons[2], taoTrafficZoomColor());
+    } else {
+        taoFillTrafficCircle(buttons[1], taoTrafficDisabledColor(self));
+    }
 }
 // Private AppKit hook: standard window buttons ask their superview whether
 // the traffic-light group is hovered before drawing the glyphs. Without it,
 // pre-Tahoe systems never show the symbols on hover (mirrors JBR's
-// AWTButtonsView).
+// AWTButtonsView). Miniaturise is never in the group — it is disabled.
 - (BOOL)_mouseInGroup:(NSButton *)button {
-    (void)button;
+    if (self.subviews.count >= 2 && button == self.subviews[1]) return NO;
     return _mouseInside;
 }
 @end
@@ -604,7 +665,9 @@ static void installFullScreenButtons(NSWindow *window, float titleBarHeight) {
         ? (NSViewMinXMargin | NSViewMinYMargin)
         : NSViewMinYMargin;
 
-    NSUInteger masks = [window styleMask];
+    // Drop FullScreen from the mask: copies built with it draw as inactive
+    // gray and the miniaturise widget is born disabled (issue #531).
+    NSUInteger masks = [window styleMask] & ~NSWindowStyleMaskFullScreen;
     NSArray<NSNumber *> *types = @[
         @(NSWindowCloseButton), @(NSWindowMiniaturizeButton), @(NSWindowZoomButton)
     ];
@@ -627,12 +690,21 @@ static void installFullScreenButtons(NSWindow *window, float titleBarHeight) {
         [btn setFrame:NSMakeRect(centerX - btnWidth / 2.0f,
                                  centerY - btnHeight / 2.0f,
                                  btnWidth, btnHeight)];
-        [btn setTarget:window];
-        [btn setAction:actions[idx]];
+        if (idx == 1) {
+            // Miniaturise is a no-op while the window is fullscreen.
+            [btn setEnabled:NO];
+            [btn setTarget:nil];
+            [btn setAction:NULL];
+        } else {
+            [btn setTarget:window];
+            [btn setAction:actions[idx]];
+        }
+        [btn setHidden:YES];
         [container addSubview:btn];
     }
 
     [parent addSubview:container];
+    [container applyHoverState];
     objc_setAssociatedObject(window, &kTaoFullscreenButtonsKey, container,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
@@ -688,6 +760,7 @@ static void updateFullScreenButtonsPosition(NSWindow *window) {
                                  centerY - btnHeight / 2.0f,
                                  btnWidth, btnHeight)];
     }
+    [container applyHoverState];
 }
 
 // ── Menu bar reveal tracking (Carbon) ───────────────────────────────────
@@ -2779,10 +2852,18 @@ Java_dev_nucleusframework_window_tao_ffi_NativeMetalBridge_nativeDiagViewTopLeft
         if (view == nil || parent == nil) return;
         CGFloat scale = view.window.backingScaleFactor;
         if (scale <= 0) scale = 1.0;
-        NSRect f = view.frame;
-        CGFloat topPt = parent.isFlipped
+        // Report in the content view's coordinate space (Compose
+        // `positionInRoot`): NativeView blending parents the child under
+        // the theme frame, below the content view, so a superview-local
+        // origin would not match the Compose slot.
+        NSView *content = view.window.contentView;
+        NSRect f = (content != nil && parent != content)
+            ? [parent convertRect:view.frame toView:content]
+            : view.frame;
+        NSView *space = (content != nil) ? content : parent;
+        CGFloat topPt = space.isFlipped
             ? f.origin.y
-            : parent.bounds.size.height - (f.origin.y + f.size.height);
+            : space.bounds.size.height - (f.origin.y + f.size.height);
         int64_t x = (int64_t) lround(f.origin.x * scale);
         int64_t y = (int64_t) lround(topPt * scale);
         packed = (jlong)((((uint64_t)(uint32_t) x) << 32) | ((uint64_t)(uint32_t) y));
@@ -2790,6 +2871,76 @@ Java_dev_nucleusframework_window_tao_ffi_NativeMetalBridge_nativeDiagViewTopLeft
     if ([NSThread isMainThread]) read();
     else                          dispatch_sync(dispatch_get_main_queue(), read);
     return packed;
+}
+
+/* macOS only, headful e2e (#652 / #653 / #654): hands a synthetic
+ * `scrollWheel:` NSEvent to the tao NSView passed in — the entry point a real
+ * trackpad or wheel event takes once the WindowServer has routed it. Skipping
+ * the WindowServer (CGEventPost) means no Accessibility grant and no cursor
+ * parked over the window are needed, and the delivery is deterministic.
+ *
+ * (x, y) are view-local points with a top-left origin (Compose dp).
+ * (dx, dy) are AppKit `scrollingDelta*` values: points when `precise`
+ * (`hasPreciseScrollingDeltas == YES`, trackpad), lines otherwise (wheel).
+ * They are whole numbers by construction: the CGEvent point/line delta fields
+ * are integers and `+[NSEvent eventWithCGEvent:]` derives `scrollingDelta*`
+ * from them (setting the fixed-point fields only changes the legacy
+ * `deltaX/Y`) — verified, not assumed; cases that need sub-point steps have
+ * to go through the JVM-side scene harness instead.
+ * `phase` / `momentumPhase` use the IOHID field encodings that
+ * `+[NSEvent eventWithCGEvent:]` decodes into `NSEventPhase` — phase: 1 began,
+ * 2 changed, 4 ended, 8 cancelled, 128 may-begin; momentum: 1 began, 2 changed,
+ * 3 ended. 0 leaves the field unset (a wheel / phase-less device).
+ *
+ * A CGEvent-built NSEvent has no window: its `locationInWindow` is the CG
+ * location flipped against the primary display. The location is therefore
+ * chosen so that the flipped value equals the wanted window point, which is
+ * what tao's `mouse_motion` (run first by `scroll_wheel`) resolves back to
+ * the view-local cursor position.
+ *
+ * This DRIVES the app rather than reading it, so unlike the other nativeDiag*
+ * entries it is inert unless the process was started with
+ * NUCLEUS_TAO_INPUT_INJECTION=1 (the taoHeadfulTest Gradle task sets it) and
+ * it only runs on the main thread. Returns JNI false when disabled, off the
+ * main thread, or when the view, its window or the primary screen is gone;
+ * JNI true only once `scrollWheel:` was actually sent to the given view. */
+JNIEXPORT jboolean JNICALL
+Java_dev_nucleusframework_window_tao_ffi_NativeMetalBridge_nativeDiagInjectScrollWheel(
+        JNIEnv *env, jclass clazz, jlong nsViewPtr,
+        jfloat x, jfloat y, jfloat dx, jfloat dy, jboolean precise,
+        jint phase, jint momentumPhase) {
+    (void)env; (void)clazz;
+    if (![NSThread isMainThread] || nsViewPtr == 0) return JNI_FALSE;
+    // Main thread only from here on, so the lazy flag needs no atomics.
+    static int sEnabled = -1;
+    if (sEnabled < 0) {
+        const char *flag = getenv("NUCLEUS_TAO_INPUT_INJECTION");
+        sEnabled = (flag != NULL && strcmp(flag, "1") == 0) ? 1 : 0;
+    }
+    if (!sEnabled) return JNI_FALSE;
+    NSView *view = (__bridge NSView *)(void *)(uintptr_t)nsViewPtr;
+    NSWindow *window = view.window;
+    NSScreen *primary = NSScreen.screens.firstObject;
+    if (window == nil || primary == nil) return JNI_FALSE;
+    // View-local top-left → window base coordinates (bottom-left).
+    NSPoint local = NSMakePoint(x, view.isFlipped ? y : view.bounds.size.height - y);
+    NSPoint inWindow = [view convertPoint:local toView:nil];
+    CGEventRef cg = CGEventCreateScrollWheelEvent(
+        NULL, precise ? kCGScrollEventUnitPixel : kCGScrollEventUnitLine, 2,
+        (int32_t)lroundf(dy), (int32_t)lroundf(dx));
+    if (cg == NULL) return JNI_FALSE;
+    if (phase != 0) {
+        CGEventSetIntegerValueField(cg, kCGScrollWheelEventScrollPhase, phase);
+    }
+    if (momentumPhase != 0) {
+        CGEventSetIntegerValueField(cg, kCGScrollWheelEventMomentumPhase, momentumPhase);
+    }
+    CGEventSetLocation(cg, CGPointMake(inWindow.x, primary.frame.size.height - inWindow.y));
+    NSEvent *event = [NSEvent eventWithCGEvent:cg];
+    CFRelease(cg);
+    if (event == nil) return JNI_FALSE;
+    [view scrollWheel:event];
+    return JNI_TRUE;
 }
 
 /* CFGetRetainCount of view.window. Only deltas are meaningful (AppKit holds

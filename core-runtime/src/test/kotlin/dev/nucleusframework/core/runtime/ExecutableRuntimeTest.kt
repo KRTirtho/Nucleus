@@ -2,10 +2,16 @@ package dev.nucleusframework.core.runtime
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 class ExecutableRuntimeTest {
+    @get:Rule
+    val tmpDir = TemporaryFolder()
+
     @Test
     fun `parses known executable types`() {
         assertEquals(ExecutableType.EXE, ExecutableRuntime.parseType("exe"))
@@ -40,11 +46,31 @@ class ExecutableRuntimeTest {
     @Test
     fun `parses type variants`() {
         assertEquals(ExecutableType.EXE, ExecutableRuntime.parseType(".EXE"))
+        assertEquals(ExecutableType.EXE, ExecutableRuntime.parseType("  .exe  "))
+        assertEquals(ExecutableType.MSI, ExecutableRuntime.parseType(".msi"))
+        assertEquals(ExecutableType.DMG, ExecutableRuntime.parseType(".dmg"))
+        assertEquals(ExecutableType.PKG, ExecutableRuntime.parseType(".pkg"))
+        assertEquals(ExecutableType.DEB, ExecutableRuntime.parseType(".deb"))
+        assertEquals(ExecutableType.RPM, ExecutableRuntime.parseType(".rpm"))
         assertEquals(ExecutableType.APPX, ExecutableRuntime.parseType(".appx"))
         assertEquals(ExecutableType.SNAP, ExecutableRuntime.parseType(".snap"))
+        assertEquals(ExecutableType.FLATPAK, ExecutableRuntime.parseType(".flatpak"))
+        assertEquals(ExecutableType.ZIP, ExecutableRuntime.parseType(".zip"))
         assertEquals(ExecutableType.TAR, ExecutableRuntime.parseType(".tar.gz"))
         assertEquals(ExecutableType.SEVEN_Z, ExecutableRuntime.parseType(".7z"))
         assertEquals(ExecutableType.DEV, ExecutableRuntime.parseType("app-image"))
+        assertEquals(ExecutableType.DEV, ExecutableRuntime.parseType("dev"))
+        assertEquals(ExecutableType.DEV, ExecutableRuntime.parseType("development"))
+    }
+
+    @Test
+    fun `parses every remaining alias`() {
+        assertEquals(ExecutableType.PACMAN, ExecutableRuntime.parseType("pacman"))
+        assertEquals(ExecutableType.PACMAN, ExecutableRuntime.parseType(".pacman"))
+        assertEquals(ExecutableType.PACMAN, ExecutableRuntime.parseType(".pkg.tar.zst"))
+        assertEquals(ExecutableType.ZIP, ExecutableRuntime.parseType("zip"))
+        assertEquals(ExecutableType.NSIS_WEB, ExecutableRuntime.parseType("NSIS-WEB"))
+        assertEquals(ExecutableType.PORTABLE, ExecutableRuntime.parseType(" PORTABLE "))
     }
 
     @Test
@@ -93,9 +119,99 @@ class ExecutableRuntimeTest {
             System.setProperty(ExecutableRuntime.TYPE_PROPERTY, "other")
             assertTrue(ExecutableRuntime.isDev())
             assertFalse(ExecutableRuntime.isMsi())
+
+            System.setProperty(ExecutableRuntime.TYPE_PROPERTY, "exe")
+            assertTrue(ExecutableRuntime.isExe())
+            assertEquals(ExecutableType.EXE, ExecutableRuntime.type())
+
+            System.setProperty(ExecutableRuntime.TYPE_PROPERTY, "nsis-web")
+            assertTrue(ExecutableRuntime.isNsisWeb())
+
+            System.setProperty(ExecutableRuntime.TYPE_PROPERTY, "portable")
+            assertTrue(ExecutableRuntime.isPortable())
+
+            System.setProperty(ExecutableRuntime.TYPE_PROPERTY, "appx")
+            assertTrue(ExecutableRuntime.isAppX())
+
+            System.setProperty(ExecutableRuntime.TYPE_PROPERTY, "dmg")
+            assertTrue(ExecutableRuntime.isDmg())
+
+            System.setProperty(ExecutableRuntime.TYPE_PROPERTY, "pkg")
+            assertTrue(ExecutableRuntime.isPkg())
+
+            System.setProperty(ExecutableRuntime.TYPE_PROPERTY, "deb")
+            assertTrue(ExecutableRuntime.isDeb())
+
+            System.setProperty(ExecutableRuntime.TYPE_PROPERTY, "flatpak")
+            assertTrue(ExecutableRuntime.isFlatpak())
+
+            System.setProperty(ExecutableRuntime.TYPE_PROPERTY, "pacman")
+            assertTrue(ExecutableRuntime.isPacman())
+
+            System.setProperty(ExecutableRuntime.TYPE_PROPERTY, "zip")
+            assertTrue(ExecutableRuntime.isZip())
+
+            System.setProperty(ExecutableRuntime.TYPE_PROPERTY, "tar.gz")
+            assertTrue(ExecutableRuntime.isTar())
+
+            System.setProperty(ExecutableRuntime.TYPE_PROPERTY, "7z")
+            assertTrue(ExecutableRuntime.isSevenZ())
         } finally {
             restoreSystemProperty(ExecutableRuntime.TYPE_PROPERTY, previousValue)
         }
+    }
+
+    @Test
+    fun `graalvm native-image flag and marker version are unset on HotSpot`() {
+        assertFalse(ExecutableRuntime.isGraalVmNativeImage)
+        // Dev/test JVMs have no plugin-written marker next to the java executable.
+        val marker = ExecutableRuntime.markerVersion()
+        if (marker != null) {
+            assertTrue(marker.isNotBlank())
+        }
+    }
+
+    @Test
+    fun `locateMarkerFile finds the marker next to the executable`() {
+        val macOsDir = tmpDir.newFolder("Contents", "MacOS")
+
+        val marker = macOsDir.resolve(MARKER_FILE_NAME)
+        marker.writeText("dmg\n")
+
+        assertEquals(marker, ExecutableRuntime.locateMarkerFile(macOsDir))
+    }
+
+    @Test
+    fun `locateMarkerFile falls back to the macOS Resources directory`() {
+        val macOsDir = tmpDir.newFolder("Contents", "MacOS")
+        val resourcesDir = macOsDir.parentFile.resolve("Resources")
+        assertTrue(resourcesDir.mkdirs())
+
+        val marker = resourcesDir.resolve(MARKER_FILE_NAME)
+        marker.writeText("dmg\n")
+
+        assertEquals(marker, ExecutableRuntime.locateMarkerFile(macOsDir))
+    }
+
+    @Test
+    fun `locateMarkerFile prefers the executable directory over Resources`() {
+        val macOsDir = tmpDir.newFolder("Contents", "MacOS")
+        val resourcesDir = macOsDir.parentFile.resolve("Resources")
+        assertTrue(resourcesDir.mkdirs())
+
+        val preferredMarker = macOsDir.resolve(MARKER_FILE_NAME)
+        preferredMarker.writeText("dmg\n")
+        resourcesDir.resolve(MARKER_FILE_NAME).writeText("pkg\n")
+
+        assertEquals(preferredMarker, ExecutableRuntime.locateMarkerFile(macOsDir))
+    }
+
+    @Test
+    fun `locateMarkerFile returns null when no marker exists`() {
+        val macOsDir = tmpDir.newFolder("Contents", "MacOS")
+        assertTrue(macOsDir.parentFile.resolve("Resources").mkdirs())
+
+        assertNull(ExecutableRuntime.locateMarkerFile(macOsDir))
     }
 
     private fun restoreSystemProperty(
@@ -107,5 +223,9 @@ class ExecutableRuntimeTest {
         } else {
             System.setProperty(name, value)
         }
+    }
+
+    private companion object {
+        private const val MARKER_FILE_NAME = ".nucleus-executable-type"
     }
 }

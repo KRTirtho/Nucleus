@@ -21,6 +21,10 @@ val publishVersion =
 dependencies {
     api(project(":decorated-window-core"))
     implementation(project(":core-runtime"))
+    // Compose `Modifier.keepScreenOn()` is a no-op on desktop unless the
+    // scene's PlatformContext implements `isKeepScreenOnEnabled`. Tao owns
+    // that context and forwards it to EnergyManager.
+    implementation(project(":energy-manager"))
     implementation(libs.compose.desktop.common)
     // Compose Hot Reload interop (TaoHotReloadBridge). compileOnly: these
     // artifacts are only referenced when running under the hot-reload agent,
@@ -48,6 +52,13 @@ kotlin {
     }
 }
 
+// #636 regression guard: the Compose applier-mismatch diagnostic is a warning,
+// so ComposableTargetIsolationFixture would silently rot. Escalate it to an
+// error for the test compilation, where that fixture lives.
+tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>("compileTestKotlin") {
+    compilerOptions.freeCompilerArgs.add("-Xwarning-level=COMPOSE_APPLIER_CALL_MISMATCH:error")
+}
+
 // ── Native build ────────────────────────────────────────────────────────────
 // Tao + jni crate + per-platform helpers (Metal on macOS, WGL + WndProc deco
 // on Windows). Native binaries ship in src/main/resources/nucleus/native/.
@@ -72,6 +83,19 @@ nucleusNative {
 // native image; it consumes the compiled test classes through this
 // configuration (test source sets are not published otherwise).
 
+// Apache-2.0 §4(a) / BSD-3-Clause: this JAR ships libnucleus_tao (which statically links the
+// vendored tao and AccessKit forks) and, on Windows, the ANGLE DLLs — so the attribution notices
+// and license texts must travel with it. Copied from the repo root so there is a single copy to
+// maintain — see THIRD_PARTY_NOTICES.md §2–4.
+tasks.named<Jar>("jar") {
+    metaInf {
+        from(rootProject.file("THIRD_PARTY_NOTICES.md"))
+        from(rootProject.file("licenses")) {
+            into("licenses")
+        }
+    }
+}
+
 val taoTestClassesJar by tasks.registering(Jar::class) {
     archiveClassifier.set("test-classes")
     from(sourceSets.test.get().output)
@@ -93,17 +117,58 @@ artifacts {
 // accepts window creation from thread 0. Not part of `check`: needs a display
 // (real session on macOS/Windows CI runners, Xvfb+WM on Linux).
 
+val taoHeadfulKoverReport =
+    layout.buildDirectory.file("kover/bin-reports/taoHeadful.ic")
+
 val taoHeadfulTest by tasks.registering(JavaExec::class) {
     description = "Runs the stage-2 real-window Tao test suite (requires a display)"
     group = "verification"
     classpath = sourceSets.test.get().runtimeClasspath
     mainClass.set("dev.nucleusframework.window.tao.headful.TaoHeadfulTestSuiteMain")
+    // Unattended: a fatal must fail the suite loudly, not block in the #622
+    // native dialog until the global watchdog halts and eats the real result.
+    systemProperty("nucleus.tao.fatalErrorDialog", "false")
+    // Arms the macOS scrollWheel: injector (nativeDiagInjectScrollWheel) the
+    // trackpad cases drive; it is inert in any process without this variable.
+    environment("NUCLEUS_TAO_INPUT_INJECTION", "1")
+    // Same Kover JVM agent the `test` task uses, so headful window coverage
+    // is counted. JavaExec is otherwise invisible to Kover.
+    dependsOn(tasks.named("koverFindJar"))
+    // Resolve these as RegularFileProperty at configuration time so the
+    // doFirst action does not capture the Gradle script `layout` object
+    // (configuration-cache incompatible).
+    val koverAgentJar =
+        layout.buildDirectory
+            .file(libs.versions.kover.map { "kover/kover-jvm-agent-$it.jar" })
+    val koverArgsFile =
+        layout.buildDirectory
+            .file("tmp/taoHeadful/kover-agent.args")
+    val koverReportFile = taoHeadfulKoverReport
+    doFirst {
+        val agent = koverAgentJar.get().asFile
+        val report = koverReportFile.get().asFile
+        report.parentFile.mkdirs()
+        val argsFile = koverArgsFile.get().asFile
+        argsFile.parentFile.mkdirs()
+        argsFile.writeText(
+            buildString {
+                appendLine("report.file=${report.absolutePath}")
+                appendLine("exclude=android.*")
+                appendLine("exclude=com.android.*")
+                appendLine("exclude=jdk.internal.*")
+            },
+        )
+        jvmArgs("-javaagent:${agent.absolutePath}=file:${argsFile.absolutePath}")
+    }
     // Forward the watchdog / case-name filter overrides into the forked JVM.
     System.getProperty("nucleus.tao.headful.watchdogMillis")?.let {
         systemProperty("nucleus.tao.headful.watchdogMillis", it)
     }
     System.getProperty("nucleus.tao.headful.filter")?.let {
         systemProperty("nucleus.tao.headful.filter", it)
+    }
+    System.getProperty("nucleus.issue576.samples")?.let {
+        systemProperty("nucleus.issue576.samples", it)
     }
     // Honor a caller-forced Linux renderer (x11 / wayland) so portal parenting
     // e2es can be launched against XWayland from a native Wayland session.
@@ -130,6 +195,8 @@ val taoX11PortalE2E by tasks.registering(JavaExec::class) {
     classpath = sourceSets.test.get().runtimeClasspath
     mainClass.set("dev.nucleusframework.window.tao.headful.TaoHeadfulTestSuiteMain")
     systemProperty("nucleus.tao.headful.filter", "x11 XID")
+    // Unattended — see taoHeadfulTest.
+    systemProperty("nucleus.tao.fatalErrorDialog", "false")
     System.getProperty("nucleus.tao.headful.watchdogMillis")?.let {
         systemProperty("nucleus.tao.headful.watchdogMillis", it)
     }
@@ -142,6 +209,8 @@ val smokeStandalonePanelMac by tasks.registering(JavaExec::class) {
     onlyIf { Os.isFamily(Os.FAMILY_MAC) }
     classpath = sourceSets.test.get().runtimeClasspath
     mainClass.set("dev.nucleusframework.window.tao.StandalonePanelMacSmokeMain")
+    // Unattended — see taoHeadfulTest.
+    systemProperty("nucleus.tao.fatalErrorDialog", "false")
     // Run main() on thread 0 (the macOS main thread). The JVM normally runs
     // main() on a spawned pthread, but AppKit only permits NSWindow/NSPanel
     // creation on the true main thread. -XstartOnFirstThread is the same flag
@@ -161,6 +230,8 @@ val taoTransparentSmoke by tasks.registering(JavaExec::class) {
     group = "verification"
     classpath = sourceSets.test.get().runtimeClasspath
     mainClass.set("dev.nucleusframework.window.tao.headful.TransparentWindowSmokeMain")
+    // Unattended — see taoHeadfulTest.
+    systemProperty("nucleus.tao.fatalErrorDialog", "false")
     // Linux: pin the window to XWayland. Robot goes through the X server, so on
     // a native Wayland session it cannot see the Tao surface (both captures come
     // back byte-identical) and xdg-shell drops setOuterPosition, leaving the
@@ -200,6 +271,27 @@ val taoTransparentSmoke by tasks.registering(JavaExec::class) {
     // -Dnucleus.tao.transparent.smoke.holdMs=10000
     System.getProperty("nucleus.tao.transparent.smoke.holdMs")?.let {
         systemProperty("nucleus.tao.transparent.smoke.holdMs", it)
+    }
+}
+
+// Manual smoke for #622: fatal-exception path end to end — SEVERE log, native
+// error dialog, exit code 1. The expected outcome is Gradle failing with
+// "finished with non-zero exit value 1" after the dialog is dismissed.
+// Not part of `check`.
+val taoFatalDialogSmoke by tasks.registering(JavaExec::class) {
+    description = "Manual smoke: fatal-error path — native dialog then exit code 1 (#622)"
+    group = "verification"
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("dev.nucleusframework.window.tao.headful.FatalErrorDialogSmokeMain")
+    // Forward the crash delay so the window can be looked at first, e.g.
+    // -Dnucleus.tao.fatal.smoke.crashAfterMs=10000
+    System.getProperty("nucleus.tao.fatal.smoke.crashAfterMs")?.let {
+        systemProperty("nucleus.tao.fatal.smoke.crashAfterMs", it)
+    }
+    // Forward the #622 escape hatch so the smoke can also exercise the
+    // dialog-less unattended path: -Dnucleus.tao.fatalErrorDialog=false
+    System.getProperty("nucleus.tao.fatalErrorDialog")?.let {
+        systemProperty("nucleus.tao.fatalErrorDialog", it)
     }
 }
 

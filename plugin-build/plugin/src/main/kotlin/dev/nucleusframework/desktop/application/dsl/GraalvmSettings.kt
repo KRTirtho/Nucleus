@@ -21,6 +21,11 @@ abstract class GraalvmSettings
     ) {
         val isEnabled: Property<Boolean> = objects.notNullProperty(false)
 
+        // Skip AWT/Java2D/Skiko reachability metadata and companion GUI native libs
+        // (libawt, libfontmanager, Skiko, …). Use for daemons and CLIs. Also bakes
+        // `-Djava.awt.headless=true` into the image.
+        val headless: Property<Boolean> = objects.notNullProperty(false)
+
         // Gradle toolchain spec used only when toolchain.autoDownload is disabled; the
         // auto-downloaded toolchain is selected via toolchain { channel / version } instead.
         @Suppress("MagicNumber")
@@ -197,7 +202,7 @@ abstract class GraalvmSettings
  * [distribution] still declares intent in that case, since it also gates the Oracle-only
  * tasks (`runWithPgoInstrument`).
  *
- * "latest" versions ("25", "25i2") are sticky once downloaded; delete the corresponding
+ * "latest" versions ("25", "25i3") are sticky once downloaded; delete the corresponding
  * directory under [installDir] to pick up a newer build.
  */
 abstract class GraalvmToolchainSettings
@@ -222,7 +227,7 @@ abstract class GraalvmToolchainSettings
 
         /**
          * Explicit GraalVM version, overriding [channel]: an innovation release
-         * (`"25i2"`), a feature version tracking the latest CPU (`"25"`), or a pinned
+         * (`"25i3"`), a feature version tracking the latest CPU (`"25"`), or a pinned
          * patch release (`"25.0.1"`).
          */
         val version: Property<String> = objects.nullableProperty()

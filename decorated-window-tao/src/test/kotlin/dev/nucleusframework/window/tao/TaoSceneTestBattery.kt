@@ -4,18 +4,30 @@ import dev.nucleusframework.window.TitleBarHitTestTest
 import dev.nucleusframework.window.tao.TaoWindowResizableTest
 import dev.nucleusframework.window.tao.TaoWindowScrollTest
 import dev.nucleusframework.window.tao.a11y.TaoA11yProjectionTest
+import dev.nucleusframework.window.tao.event.LinuxWheelDeltaTest
+import dev.nucleusframework.window.tao.event.MacOsWheelDeltaTest
 import dev.nucleusframework.window.tao.event.TaoKeyMappingTest
 import dev.nucleusframework.window.tao.event.TaoKeyboardModifiersDecodeTest
 import dev.nucleusframework.window.tao.event.TaoSyntheticMouseWheelEventTest
 import dev.nucleusframework.window.tao.event.TaoWheelPinchZoomTest
+import dev.nucleusframework.window.tao.event.Win32WheelDeltaTest
+import dev.nucleusframework.window.tao.popup.StandaloneFramePumpTest
+import dev.nucleusframework.window.tao.popup.StandalonePopupRenderReentryTest
 import dev.nucleusframework.window.tao.scene.TaoSceneAnimationTest
+import dev.nucleusframework.window.tao.scene.TaoSceneContentSwapTest
+import dev.nucleusframework.window.tao.scene.TaoSceneExceptionHandlerTest
+import dev.nucleusframework.window.tao.scene.TaoSceneExceptionRouterTest
+import dev.nucleusframework.window.tao.scene.TaoSceneImeTest
 import dev.nucleusframework.window.tao.scene.TaoSceneKeyboardTest
 import dev.nucleusframework.window.tao.scene.TaoSceneOuterLocalsBridgeTest
+import dev.nucleusframework.window.tao.scene.TaoScenePointerSlopTest
 import dev.nucleusframework.window.tao.scene.TaoScenePointerTest
 import dev.nucleusframework.window.tao.scene.TaoScenePopupTest
 import dev.nucleusframework.window.tao.scene.TaoSceneRenderTest
 import dev.nucleusframework.window.tao.scene.TaoSceneScrollTest
 import dev.nucleusframework.window.tao.scene.TaoSceneSemanticsTest
+import dev.nucleusframework.window.tao.scene.TaoSceneTrackpadPanTest
+import dev.nucleusframework.window.tao.scene.TaoTrackpadPanRouterTest
 
 /**
  * Programmatic, reflection-free registry of the stage-1 offscreen battery so
@@ -84,6 +96,15 @@ public object TaoSceneTestBattery {
         run("TaoKeyMappingTest: linux ctrl combos fall back to the latin keysym") {
             TaoKeyMappingTest().`linux ctrl combos fall back to the latin keysym`()
         }
+        run("TaoKeyMappingTest: linux function keys F1 to F12") {
+            TaoKeyMappingTest().`linux function keys F1 to F12`()
+        }
+        run("TaoKeyMappingTest: linux keypad keys carry numpad location") {
+            TaoKeyMappingTest().`linux keypad keys carry numpad location`()
+        }
+        run("TaoKeyMappingTest: linux navigation space caps lock and punctuation") {
+            TaoKeyMappingTest().`linux navigation space caps lock and punctuation`()
+        }
         run("TaoKeyboardModifiersDecodeTest: all sixteen combinations decode exactly") {
             TaoKeyboardModifiersDecodeTest().`all sixteen combinations decode exactly`()
         }
@@ -92,6 +113,74 @@ public object TaoSceneTestBattery {
         }
         run("TaoSyntheticMouseWheelEventTest: syntheticEventCarriesAwtScrollMetadata") {
             TaoSyntheticMouseWheelEventTest().syntheticEventCarriesAwtScrollMetadata()
+        }
+        run("Win32WheelDeltaTest: wheelTowardsUserMatchesTaoWindowAwtSign") {
+            Win32WheelDeltaTest().wheelTowardsUserMatchesTaoWindowAwtSign()
+        }
+        run("Win32WheelDeltaTest: horizontalWheelIsNegatedToAwtSign") {
+            Win32WheelDeltaTest().horizontalWheelIsNegatedToAwtSign()
+        }
+        run("Win32WheelDeltaTest: popupWndProcNotchCarriesWindowScrollAmount") {
+            Win32WheelDeltaTest().popupWndProcNotchCarriesWindowScrollAmount()
+        }
+        run("LinuxWheelDeltaTest: popupButton5CarriesThreeLinesPerNotch") {
+            LinuxWheelDeltaTest().popupButton5CarriesThreeLinesPerNotch()
+        }
+        run("MacOsWheelDeltaTest: scrollUpMatchesTaoWindowAwtSign") {
+            MacOsWheelDeltaTest().scrollUpMatchesTaoWindowAwtSign()
+        }
+        run("MacOsWheelDeltaTest: horizontalDeltaFlipsLikeVertical") {
+            MacOsWheelDeltaTest().horizontalDeltaFlipsLikeVertical()
+        }
+        run("MacOsWheelDeltaTest: precisePixelDeltaIgnoresDisplayScale") {
+            MacOsWheelDeltaTest().precisePixelDeltaIgnoresDisplayScale()
+        }
+        run("MacOsWheelDeltaTest: precisePixelHorizontalFlipsAndDividesByTen") {
+            MacOsWheelDeltaTest().precisePixelHorizontalFlipsAndDividesByTen()
+        }
+        run("MacOsWheelDeltaTest: lineDeltaCarriesMacOsScrollAmount") {
+            MacOsWheelDeltaTest().lineDeltaCarriesMacOsScrollAmount()
+        }
+        run("MacOsWheelDeltaTest: preciseDeltaCarriesMacOsScrollAmount") {
+            MacOsWheelDeltaTest().preciseDeltaCarriesMacOsScrollAmount()
+        }
+        run("MacOsWheelDeltaTest: gesturePhaseRidesAlongWhateverThePrecisionFlag") {
+            MacOsWheelDeltaTest().gesturePhaseRidesAlongWhateverThePrecisionFlag()
+        }
+        run("StandaloneFramePumpTest: scheduleOnMainRunsInline") {
+            StandaloneFramePumpTest().scheduleOnMainRunsInline()
+        }
+        run("StandaloneFramePumpTest: nestedScheduleFromRenderDoesNotReenter") {
+            StandaloneFramePumpTest().nestedScheduleFromRenderDoesNotReenter()
+        }
+        run("StandaloneFramePumpTest: extraSchedulesWhileRenderingCoalesce") {
+            StandaloneFramePumpTest().extraSchedulesWhileRenderingCoalesce()
+        }
+        run("StandaloneFramePumpTest: scheduleInsideNonReentrantBlockIsPosted") {
+            StandaloneFramePumpTest().scheduleInsideNonReentrantBlockIsPosted()
+        }
+        run("StandaloneFramePumpTest: inlineRenderResumesAfterNonReentrantBlock") {
+            StandaloneFramePumpTest().inlineRenderResumesAfterNonReentrantBlock()
+        }
+        run("StandaloneFramePumpTest: scheduleAfterDisposeIsNoOp") {
+            StandaloneFramePumpTest().scheduleAfterDisposeIsNoOp()
+        }
+        run("StandaloneFramePumpTest: disposedPostedFrameIsDropped") {
+            StandaloneFramePumpTest().disposedPostedFrameIsDropped()
+        }
+        run(
+            "StandalonePopupRenderReentryTest: guarded scrollbar drag posts the frame " +
+                "instead of re-entering the render pass",
+        ) {
+            StandalonePopupRenderReentryTest()
+                .`guarded scrollbar drag posts the frame instead of re-entering the render pass`()
+        }
+        run(
+            "StandalonePopupRenderReentryTest: unguarded scene dispatch re-enters the render pass " +
+                "- the failure mode the guard exists for",
+        ) {
+            StandalonePopupRenderReentryTest()
+                .`unguarded scene dispatch re-enters the render pass - the failure mode the guard exists for`()
         }
         run("TaoWheelPinchZoomTest: fullWheelDeltaProducesModerateZoomStep") {
             TaoWheelPinchZoomTest().fullWheelDeltaProducesModerateZoomStep()
@@ -106,7 +195,64 @@ public object TaoSceneTestBattery {
         run("TaoWindowScrollTest: pixelScrollMirrorsMacOsAwtPreciseWheelRotationScale") {
             TaoWindowScrollTest().pixelScrollMirrorsMacOsAwtPreciseWheelRotationScale()
         }
+        run("TaoWindowScrollTest: scrollGestureIsShapedLikePixelScrollWithItsPhase") {
+            TaoWindowScrollTest().scrollGestureIsShapedLikePixelScrollWithItsPhase()
+        }
+        run("TaoWindowScrollTest: unknownGestureWireCodeDegradesToPlainPreciseScroll") {
+            TaoWindowScrollTest().unknownGestureWireCodeDegradesToPlainPreciseScroll()
+        }
+        run("TaoTrackpadPanRouterTest: swipe without momentum ends after the grace period") {
+            TaoTrackpadPanRouterTest().`swipe without momentum ends after the grace period`()
+        }
+        run("TaoTrackpadPanRouterTest: terminal steps carrying a delta still pan when no gesture is open") {
+            TaoTrackpadPanRouterTest().`terminal steps carrying a delta still pan when no gesture is open`()
+        }
+        run("TaoTrackpadPanRouterTest: momentum tail continues the pan and ends it once") {
+            TaoTrackpadPanRouterTest().`momentum tail continues the pan and ends it once`()
+        }
+        run("TaoTrackpadPanRouterTest: a momentum tail arriving after the pan closed is handed back unhandled") {
+            TaoTrackpadPanRouterTest().`a momentum tail arriving after the pan closed is handed back unhandled`()
+        }
+        run("TaoTrackpadPanRouterTest: fingers resting on the glass during the tail close the pan at once") {
+            TaoTrackpadPanRouterTest().`fingers resting on the glass during the tail close the pan at once`()
+        }
+        run("TaoTrackpadPanRouterTest: a truncated stream is closed by the stall watchdog") {
+            TaoTrackpadPanRouterTest().`a truncated stream is closed by the stall watchdog`()
+        }
+        run("TaoTrackpadPanRouterTest: finger steps move the deadline without re-scheduling the timer") {
+            TaoTrackpadPanRouterTest().`finger steps move the deadline without re-scheduling the timer`()
+        }
+        run("TaoTrackpadPanRouterTest: finishNow closes an open pan and is a no-op otherwise") {
+            TaoTrackpadPanRouterTest().`finishNow closes an open pan and is a no-op otherwise`()
+        }
+        run("TaoTrackpadPanRouterTest: pan offsets pass through unchanged and zero deltas send no move") {
+            TaoTrackpadPanRouterTest().`pan offsets pass through unchanged and zero deltas send no move`()
+        }
+        run("TaoTrackpadPanRouterTest: cancelled closes immediately and may-begin alone is silent") {
+            TaoTrackpadPanRouterTest().`cancelled closes immediately and may-begin alone is silent`()
+        }
+        run("TaoTrackpadPanRouterTest: a new swipe during the grace period keeps the same pan open") {
+            TaoTrackpadPanRouterTest().`a new swipe during the grace period keeps the same pan open`()
+        }
+        run("TaoTrackpadPanRouterTest: cancel drops the pending end without sending PanEnd") {
+            TaoTrackpadPanRouterTest().`cancel drops the pending end without sending PanEnd`()
+        }
         run("TaoWindowResizableTest: reflectsCreationFlag") { TaoWindowResizableTest().reflectsCreationFlag() }
+        run("WindowWrapContentTest: creationSizeUsesSpecifiedAxis") {
+            WindowWrapContentTest().creationSizeUsesSpecifiedAxis()
+        }
+        run("WindowWrapContentTest: wrapHeightKeepsRequestedWidth") {
+            WindowWrapContentTest().wrapHeightKeepsRequestedWidth()
+        }
+        run("WindowWrapContentTest: wrapBothUsesMeasuredPixels") {
+            WindowWrapContentTest().wrapBothUsesMeasuredPixels()
+        }
+        run("WindowWrapContentTest: wrapWaitsForPositiveMeasuredAxis") {
+            WindowWrapContentTest().wrapWaitsForPositiveMeasuredAxis()
+        }
+        run("WindowWrapContentTest: wrapHonoursMinimumSizeFloor") {
+            WindowWrapContentTest().wrapHonoursMinimumSizeFloor()
+        }
         run("TaoSceneRenderTest: solid background fills the whole frame") {
             TaoSceneRenderTest().`solid background fills the whole frame`()
         }
@@ -146,6 +292,39 @@ public object TaoSceneTestBattery {
         run("TaoSceneKeyboardTest: fallback key handler fires only when the scene does not consume") {
             TaoSceneKeyboardTest().`fallback key handler fires only when the scene does not consume`()
         }
+        run("TaoSceneImeTest: IME preedit is shown in the field while composing") {
+            TaoSceneImeTest().`IME preedit is shown in the field while composing`()
+        }
+        run("TaoSceneImeTest: IME preedit is an active composition, not committed text") {
+            TaoSceneImeTest().`IME preedit is an active composition, not committed text`()
+        }
+        run("TaoSceneImeTest: IME commit replaces the preedit without inserting a newline") {
+            TaoSceneImeTest().`IME commit replaces the preedit without inserting a newline`()
+        }
+        run("TaoSceneImeTest: shortening the preedit does not delete committed text") {
+            TaoSceneImeTest().`shortening the preedit does not delete committed text`()
+        }
+        run("TaoSceneImeTest: committed text replaces the preedit") {
+            TaoSceneImeTest().`committed text replaces the preedit`()
+        }
+        run("TaoSceneImeTest: cancelled composition removes the preedit") {
+            TaoSceneImeTest().`cancelled composition removes the preedit`()
+        }
+        run("TaoSceneImeTest: empty IME commit while composing does not wipe the preedit") {
+            TaoSceneImeTest().`empty IME commit while composing does not wipe the preedit`()
+        }
+        run("TaoSceneImeTest: typing after a commit works normally") {
+            TaoSceneImeTest().`typing after a commit works normally`()
+        }
+        run("TaoSceneImeTest: replacement commit replaces the range the picker names") {
+            TaoSceneImeTest().`replacement commit replaces the range the picker names`()
+        }
+        run("TaoSceneImeTest: replacement commit leaves surrounding text intact and typing continues") {
+            TaoSceneImeTest().`replacement commit leaves surrounding text intact and typing continues`()
+        }
+        run("TaoSceneImeTest: replacement commit with an out-of-bounds range is clamped") {
+            TaoSceneImeTest().`replacement commit with an out-of-bounds range is clamped`()
+        }
         run("TaoScenePointerTest: click on a clickable box fires exactly once") {
             TaoScenePointerTest().`click on a clickable box fires exactly once`()
         }
@@ -169,6 +348,24 @@ public object TaoSceneTestBattery {
         }
         run("TaoScenePointerTest: hover exit resets hover state via exitPointer") {
             TaoScenePointerTest().`hover exit resets hover state via exitPointer`()
+        }
+        run("TaoScenePointerSlopTest: sub-pixel jitter between press and release must not eat the click") {
+            TaoScenePointerSlopTest().`sub-pixel jitter between press and release must not eat the click`()
+        }
+        run("TaoScenePointerSlopTest: sub-pixel jitter must not eat the click on a HiDPI display") {
+            TaoScenePointerSlopTest().`sub-pixel jitter must not eat the click on a HiDPI display`()
+        }
+        run("TaoScenePointerSlopTest: real motion past the deadband still drags and cancels the click") {
+            TaoScenePointerSlopTest().`real motion past the deadband still drags and cancels the click`()
+        }
+        run("TaoScenePointerSlopTest: moves below one dp are suppressed and real motion keeps sub-pixel precision") {
+            TaoScenePointerSlopTest().`moves below one dp are suppressed and real motion keeps sub-pixel precision`()
+        }
+        run("TaoScenePointerSlopTest: press after suppressed jitter dispatches at the last dispatched position") {
+            TaoScenePointerSlopTest().`press after suppressed jitter dispatches at the last dispatched position`()
+        }
+        run("TaoScenePointerSlopTest: touch slop is density-scaled like the AWT backend") {
+            TaoScenePointerSlopTest().`touch slop is density-scaled like the AWT backend`()
         }
         run("TitleBarHitTestTest: opaque overlay bar does not leak clicks to the content below") {
             TitleBarHitTestTest().`opaque overlay bar does not leak clicks to the content below`()
@@ -204,6 +401,30 @@ public object TaoSceneTestBattery {
         run("TaoSceneScrollTest: scrolled content repaints at the new offset") {
             TaoSceneScrollTest().`scrolled content repaints at the new offset`()
         }
+        run("TaoSceneTrackpadPanTest: positive vertical pan scrolls a column down") {
+            TaoSceneTrackpadPanTest().`positive vertical pan scrolls a column down`()
+        }
+        run("TaoSceneTrackpadPanTest: positive horizontal pan scrolls a row forward") {
+            TaoSceneTrackpadPanTest().`positive horizontal pan scrolls a row forward`()
+        }
+        run("TaoSceneTrackpadPanTest: negative pan at the origin is a no-op") {
+            TaoSceneTrackpadPanTest().`negative pan at the origin is a no-op`()
+        }
+        run("TaoSceneTrackpadPanTest: pan moves content by its pixel offset") {
+            TaoSceneTrackpadPanTest().`pan moves content by its pixel offset`()
+        }
+        run("TaoSceneTrackpadPanTest: routed gesture steps pan a column and close after the grace") {
+            TaoSceneTrackpadPanTest().`routed gesture steps pan a column and close after the grace`()
+        }
+        run("TaoSceneTrackpadPanTest: with pan events disabled gesture steps scroll as wheel events") {
+            TaoSceneTrackpadPanTest().`with pan events disabled gesture steps scroll as wheel events`()
+        }
+        run("TaoSceneTrackpadPanTest: an orphaned momentum tail scrolls as wheel events instead of stalling") {
+            TaoSceneTrackpadPanTest().`an orphaned momentum tail scrolls as wheel events instead of stalling`()
+        }
+        run("TaoSceneScrollTest: one wheel unit scrolls ten dp on macOS") {
+            TaoSceneScrollTest().`one wheel unit scrolls ten dp on macOS`()
+        }
         run("TaoScenePopupTest: popup renders above the window content") {
             TaoScenePopupTest().`popup renders above the window content`()
         }
@@ -212,6 +433,9 @@ public object TaoSceneTestBattery {
         }
         run("TaoScenePopupTest: outside click dismisses a focusable popup") {
             TaoScenePopupTest().`outside click dismisses a focusable popup`()
+        }
+        run("TaoScenePopupTest: two stacked popups keep independent pixels") {
+            TaoScenePopupTest().`two stacked popups keep independent pixels`()
         }
         run("TaoScenePopupTest: click inside a focusable popup does not dismiss it") {
             TaoScenePopupTest().`click inside a focusable popup does not dismiss it`()
@@ -265,6 +489,68 @@ public object TaoSceneTestBattery {
         }
         run("TaoSceneSemanticsTest: clickable nodes expose an onClick action") {
             TaoSceneSemanticsTest().`clickable nodes expose an onClick action`()
+        }
+
+        run("TaoSceneContentSwapTest: swapping a scrollable page of buttons does not crash RectList") {
+            TaoSceneContentSwapTest().`swapping a scrollable page of buttons does not crash RectList`()
+        }
+        run("TaoSceneContentSwapTest: clicking a tab remounts the body without a RectList crash") {
+            TaoSceneContentSwapTest().`clicking a tab remounts the body without a RectList crash`()
+        }
+
+        run("TaoSceneExceptionHandlerTest: composition failure reaches the handler") {
+            TaoSceneExceptionHandlerTest().`composition failure reaches the handler`()
+        }
+        run("TaoSceneExceptionHandlerTest: a swallowed composition failure leaves the scene unable to recompose") {
+            TaoSceneExceptionHandlerTest()
+                .`a swallowed composition failure leaves the scene unable to recompose`()
+        }
+        run("TaoSceneExceptionHandlerTest: a dead scene does not spin the frame scheduler") {
+            TaoSceneExceptionHandlerTest().`a dead scene does not spin the frame scheduler`()
+        }
+        run("TaoSceneExceptionHandlerTest: layout failure reaches the handler") {
+            TaoSceneExceptionHandlerTest().`layout failure reaches the handler`()
+        }
+        run("TaoSceneExceptionHandlerTest: draw failure reaches the handler and the scene keeps rendering") {
+            TaoSceneExceptionHandlerTest().`draw failure reaches the handler and the scene keeps rendering`()
+        }
+        run("TaoSceneExceptionHandlerTest: a swallowed draw failure keeps state updates flowing") {
+            TaoSceneExceptionHandlerTest().`a swallowed draw failure keeps state updates flowing`()
+        }
+        run("TaoSceneExceptionHandlerTest: a scene that survived a swallowed failure still accepts new content") {
+            TaoSceneExceptionHandlerTest().`a scene that survived a swallowed failure still accepts new content`()
+        }
+        run("TaoSceneExceptionHandlerTest: input dispatch failure reaches the handler") {
+            TaoSceneExceptionHandlerTest().`input dispatch failure reaches the handler`()
+        }
+        run("TaoSceneExceptionHandlerTest: a handler that rethrows propagates the failure") {
+            TaoSceneExceptionHandlerTest().`a handler that rethrows propagates the failure`()
+        }
+        run("TaoSceneExceptionHandlerTest: without a handler the failure propagates") {
+            TaoSceneExceptionHandlerTest().`without a handler the failure propagates`()
+        }
+
+        run("TaoSceneExceptionRouterTest: a failure with no window handler takes the fatal path") {
+            TaoSceneExceptionRouterTest().`a failure with no window handler takes the fatal path`()
+        }
+        run("TaoSceneExceptionRouterTest: a handler that rethrows takes the fatal path") {
+            TaoSceneExceptionRouterTest().`a handler that rethrows takes the fatal path`()
+        }
+        run("TaoSceneExceptionRouterTest: a handler may substitute the throwable it rethrows") {
+            TaoSceneExceptionRouterTest().`a handler may substitute the throwable it rethrows`()
+        }
+        run("TaoSceneExceptionRouterTest: a handler that returns normally swallows the failure") {
+            TaoSceneExceptionRouterTest().`a handler that returns normally swallows the failure`()
+        }
+        run("TaoSceneExceptionRouterTest: swallowing a failure the scene cannot survive is logged") {
+            TaoSceneExceptionRouterTest().`swallowing a failure the scene cannot survive is logged`()
+        }
+        run("TaoSceneExceptionRouterTest: swallowing a survivable failure is not logged") {
+            TaoSceneExceptionRouterTest().`swallowing a survivable failure is not logged`()
+        }
+        run("TaoSceneExceptionRouterTest: a failure during teardown is logged instead of taking the app down") {
+            TaoSceneExceptionRouterTest()
+                .`a failure during teardown is logged instead of taking the app down`()
         }
 
         run("TaoA11yProjectionTest: compose semantics are projected into the a11y node snapshot") {

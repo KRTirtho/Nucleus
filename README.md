@@ -6,7 +6,7 @@
 [![Maven Central](https://img.shields.io/maven-central/v/dev.nucleusframework/nucleus.core-runtime?label=Maven%20Central)](https://central.sonatype.com/search?q=dev.nucleusframework)
 [![Pre Merge Checks](https://github.com/NucleusFramework/Nucleus/actions/workflows/pre-merge.yaml/badge.svg)](https://github.com/NucleusFramework/Nucleus/actions/workflows/pre-merge.yaml)
 [![License: MIT](https://img.shields.io/github/license/NucleusFramework/Nucleus)](https://github.com/NucleusFramework/Nucleus/blob/main/LICENSE)
-![Kotlin](https://img.shields.io/badge/Kotlin-2.0%2B-7F52FF?logo=kotlin&logoColor=white)
+![Kotlin](https://img.shields.io/badge/Kotlin-2.4%2B-7F52FF?logo=kotlin&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue)
 
 The Nucleus framework lets you write cross-platform desktop applications using
@@ -22,18 +22,44 @@ API behind a Kotlin one: no AWT dependency on the Tao backend, and the accessibi
 is verified against AT-SPI, UI Automation, and macOS AX in CI on all three platforms.
 
 Read [Why Nucleus](https://nucleusframework.dev/en/docs/why-nucleus) for how it compares to
-Electron and Tauri.
+vanilla Compose Desktop, Electron, and Tauri.
 
 ## Project status
 
-Nucleus is under active development and moves fast. All published runtime modules run in
-Kotlin `explicitApi()` mode with their public surface locked by a binary-compatibility dump
-(`api/*.api`, checked by `apiCheck` via kotlinx binary-compatibility-validator). Breaking
-changes to a public FQN or signature fail CI. The one exception is `decorated-window-jewel`
-(JVM 25 bytecode), which still uses `explicitApi()` but is not dumped until BCV can read
-class-file major version 69. The Tao backend is the recommended one for new projects —
-`decorated-window-jni` and `decorated-window-jbr` are kept for existing users and receive
-fixes only.
+Published releases are `2.5.x` (latest tag `v2.5.0`). Nucleus is under active development
+and moves fast. All published runtime modules run in Kotlin `explicitApi()` mode with
+their public surface locked by a binary-compatibility dump (`api/*.api`, checked by
+`apiCheck` via kotlinx binary-compatibility-validator). Breaking changes to a public FQN
+or signature fail CI. The one exception is `decorated-window-jewel` (JVM 25 bytecode),
+which still uses `explicitApi()` but is not dumped until BCV can read class-file major
+version 69. The Tao backend is the recommended one for new projects —
+`decorated-window-jni` and `decorated-window-jbr` are deprecated and receive fixes only.
+
+## Used by
+
+Each line is the Nucleus surface that project actually depends on:
+
+- [AB Download Manager](https://github.com/amir1376/ab-download-manager) ![stars](https://img.shields.io/github/stars/amir1376/ab-download-manager?style=social) — packaging plugin, aot-runtime, tray
+- [SimpMusic](https://github.com/maxrave-dev/SimpMusic) ![stars](https://img.shields.io/github/stars/maxrave-dev/SimpMusic?style=social) — notifications
+- [Tasks.org](https://github.com/tasks/tasks) ![stars](https://img.shields.io/github/stars/tasks/tasks?style=social) — notifications
+- [CrossPaste](https://github.com/CrossPaste/crosspaste-desktop) ![stars](https://img.shields.io/github/stars/CrossPaste/crosspaste-desktop?style=social) — tray
+- [Husi](https://github.com/xchacha20-poly1305/husi) ![stars](https://img.shields.io/github/stars/xchacha20-poly1305/husi?style=social) — notifications, autolaunch, darkmode-detector, scheduler, core-runtime, tray
+- [Flare](https://github.com/DimensionDev/Flare) ![stars](https://img.shields.io/github/stars/DimensionDev/Flare?style=social) — packaging plugin, JNI window backend, darkmode-detector, aot-runtime
+- [Rush](https://github.com/shub39/Rush) ![stars](https://img.shields.io/github/stars/shub39/Rush?style=social) — packaging plugin
+- [Hammer](https://github.com/Darkrock-Studios/hammer-editor) ![stars](https://img.shields.io/github/stars/Darkrock-Studios/hammer-editor?style=social) — Tao backend, nucleus-application, decorated-window-material3, darkmode-detector, launcher
+- [OtakuWorld](https://github.com/jakepurple13/OtakuWorld) ![stars](https://img.shields.io/github/stars/jakepurple13/OtakuWorld?style=social) — nucleus-application, notifications, scheduler, taskbar-progress, system-color, system-info, core-runtime, aot-runtime, updater
+- [ZonePane](https://zonepane.com/) — packaging plugin, Tao backend
+- [WG Tunnel](https://github.com/wgtunnel/desktop) — packaging plugin, Tao backend, nucleus-application, decorated-window-material3, core-runtime, darkmode-detector, system-color, energy-manager, system-info, updater, graalvm-runtime, tray
+- [Zayit](https://github.com/kdroidFilter/Zayit) — packaging plugin, Tao backend, nucleus-application, decorated-window-core, decorated-window-jewel, core-runtime, darkmode-detector, system-color, system-info, energy-manager, notifications, updater, aot-runtime, graalvm-runtime, native-http, launcher, menu-macos, taskbar-progress-tao, sf-symbols
+- [NOMM](https://github.com/Combat787/NOMM) — packaging plugin, Tao backend, nucleus-application, decorated-window-material3, core-runtime, darkmode-detector, notifications, taskbar-progress, updater, aot-runtime, native-http, fs-watcher
+- [FuoEvolve](https://github.com/feeluown/FuoEvolve) — packaging plugin, Tao backend, nucleus-application, graalvm-runtime, media-control, notifications, launcher, tray
+- [CozySpace](https://github.com/terrakok/CozySpace) — packaging plugin, Tao backend, nucleus-application, decorated-window-core, darkmode-detector, tray
+- [Amethyst](https://github.com/anthonyhfm/Amethyst) — packaging plugin, Tao backend, nucleus-application, updater, menu-macos, global-hotkey, system-info
+- [GitVantage](https://github.com/rocketraman/gitvantage) — packaging plugin, Tao backend, nucleus-application, darkmode-detector, notifications, fs-watcher
+
+## Showcase
+
+- [EdgeTranslator](https://github.com/NucleusFramework/EdgeTranslator) — offline AI translator
 
 ## Installation
 
@@ -42,9 +68,9 @@ your module's `build.gradle.kts`:
 
 ```kotlin title="build.gradle.kts"
 plugins {
-    kotlin("jvm") version "2.4.0"
-    id("org.jetbrains.compose") version "1.11.1"
-    id("dev.nucleusframework") version "2.0.0"
+    kotlin("jvm") version "2.4.10"
+    id("org.jetbrains.compose") version "1.12.0"
+    id("dev.nucleusframework") version "2.5.0"
 }
 
 repositories {
@@ -55,9 +81,9 @@ repositories {
 dependencies {
     implementation(compose.desktop.currentOs)
     // Entry point — provides nucleusApplication and DecoratedWindow
-    implementation("dev.nucleusframework:nucleus.nucleus-application:2.0.0")
+    implementation("dev.nucleusframework:nucleus.nucleus-application:2.5.0")
     // Tao backend — Rust-native windowing
-    implementation("dev.nucleusframework:nucleus.decorated-window-tao:2.0.0")
+    implementation("dev.nucleusframework:nucleus.decorated-window-tao:2.5.0")
 }
 ```
 
@@ -72,8 +98,9 @@ Nucleus builds on Compose Multiplatform and requires:
 | Requirement | Version | Note |
 |-------------|---------|------|
 | JDK | 17+ (25+ for AOT cache) | JBR 25 recommended |
-| Kotlin | 2.0+ | Compose Multiplatform requires Kotlin 2.x |
-| Gradle | 8.0+ | Bundled wrapper is sufficient |
+| Kotlin | 2.4.10+ | This repo builds with Kotlin 2.4.10 |
+| Compose Multiplatform | 1.12.0 | Required by the 2.5 line; will not run on 1.11.x |
+| Gradle | 9.0+ | Bundled wrapper is Gradle 9.4.0 |
 
 ## Platform support
 
@@ -96,10 +123,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material.Text
 import androidx.compose.ui.Modifier
 import dev.nucleusframework.application.DecoratedWindow
-import dev.nucleusframework.application.NucleusBackend
 import dev.nucleusframework.application.nucleusApplication
 
-fun main() = nucleusApplication(backend = NucleusBackend.Tao) {
+fun main(args: Array<String>) = nucleusApplication(args) {
     DecoratedWindow(
         onCloseRequest = ::exitApplication,
         title = "MyApp",
@@ -110,6 +136,23 @@ fun main() = nucleusApplication(backend = NucleusBackend.Tao) {
     }
 }
 ```
+
+`nucleusApplication` initializes GraalVM native-image support, takes the
+single-instance lock, and primes autolaunch / Windows AUMID when those
+modules are on the classpath. Pass the process `args` so deep links,
+file associations, and "started at login" see the original command line.
+The default backend is `Auto` (Tao if `decorated-window-tao` is present,
+otherwise AWT). Inside the block you can call `onDeepLink { }` and
+`aotTraining()`; plugin-injected metadata is `NucleusApp`, not a generated
+constants object.
+
+On macOS the Tao backend delivers trackpad gestures to Compose as pan events
+(`PointerEventType.PanStart` / `PanMove` / `PanEnd`, with `panOffset` in
+pixels) and mouse-wheel notches as `Scroll`, with the same distances the AWT
+backend produces. Foundation's `Modifier.scrollable` handles both; a custom
+`pointerInput` that only reacts to `PointerEventType.Scroll` must also handle
+pan, or start the app with `-Dnucleus.tao.trackpadPanEvents=false` to receive
+AWT-style `Scroll` events for everything.
 
 Then configure packaging in `build.gradle.kts`:
 
@@ -149,11 +192,12 @@ notarization, built-in auto-update, deep links, and file associations.
 
 **Feel native** — Decorated windows with native controls, notifications, taskbar/dock
 badges and menus, media controls (MPRIS, Now Playing, SMTC), dark mode, accent colors,
-global hotkeys, and system tray — all behind clean Kotlin APIs.
+global hotkeys, system tray, native context menus, and OS spell check — all behind
+clean Kotlin APIs.
 
 **Perform** — GraalVM Native Image compiles your app to a standalone binary with automatic
-reachability metadata; a typical Compose UI cold-starts in about half a second and settles
-around 100–150 MB of RAM. Or stay on the JVM with an AOT cache (JDK 25+) and
+reachability metadata; a Hello-World Compose window cold-starts in about 0.2 s and around
+30 MB of RAM (measured on Windows 11). Or stay on the JVM with an AOT cache (JDK 25+) and
 ProGuard-optimized release builds.
 
 ## Runtime modules
@@ -162,17 +206,22 @@ Each module is published independently to Maven Central — use them together or
 
 | Module | Description |
 |--------|-------------|
-| `nucleus.core-runtime` | Platform detection, single instance, deep links, executable type |
+| `nucleus.nucleus-application` | `nucleusApplication`, backend-agnostic `DecoratedWindow` / `HostedWindow` |
+| `nucleus.core-runtime` | Platform detection, single instance, deep links, `NucleusApp` metadata |
 | `nucleus.aot-runtime` | AOT cache mode detection |
-| `nucleus.updater-runtime` | Auto-update engine with GitHub/S3, progress tracking, SHA-512 |
+| `nucleus.updater-runtime` | Auto-update (GitHub/S3), SHA-512, delta/blockmap, progress |
 | `nucleus.darkmode-detector` | Reactive OS dark mode detection |
 | `nucleus.system-color` | Reactive accent color & high contrast detection |
 | `nucleus.system-info` | CPU, memory, GPU (NVIDIA/AMD/Intel), temperature, network, processes |
-| `nucleus.decorated-window-tao` | Rust-native windowing backend (Tao) |
+| `nucleus.decorated-window-tao` | Recommended windowing backend (Rust `tao`, no AWT) |
+| `nucleus.decorated-window-core` | Shared window types, layout, chrome (design-system agnostic) |
+| `nucleus.decorated-window-awt` | AWT chrome shared by the JBR/JNI backends |
+| `nucleus.decorated-window-jbr` | Legacy JBR backend (maintenance only) |
+| `nucleus.decorated-window-jni` | Legacy JNI/AWT backend (maintenance only) |
 | `nucleus.decorated-window-jewel` | Jewel (IntelliJ theme) integration |
 | `nucleus.decorated-window-material2` | Material 2 integration |
 | `nucleus.decorated-window-material3` | Material 3 integration |
-| `nucleus.notification-common` | Cross-platform notification DSL with per-platform (`linux`/`macos`/`windows`) option blocks |
+| `nucleus.notification-common` | Cross-platform notification DSL with per-platform option blocks |
 | `nucleus.notification-macos` | macOS User Notifications |
 | `nucleus.notification-windows` | Windows Toast Notifications |
 | `nucleus.notification-linux` | Freedesktop Desktop Notifications |
@@ -181,15 +230,24 @@ Each module is published independently to Maven Central — use them together or
 | `nucleus.launcher-linux` | Unity Launcher — badge, progress, urgency, quicklist |
 | `nucleus.media-control` | OS media controls — MPRIS (Linux), Now Playing (macOS), SMTC (Windows) |
 | `nucleus.menu-macos` | Native macOS menu bar |
+| `nucleus.spellcheck` | OS spell check (Hunspell / NSSpellChecker / Windows Spell Checking) |
 | `nucleus.freedesktop-icons` | Type-safe freedesktop icon naming constants |
+| `nucleus.sf-symbols` | Type-safe SF Symbols catalog |
 | `nucleus.taskbar-progress` | Cross-platform taskbar progress bar & attention requests |
+| `nucleus.taskbar-progress-tao` | Taskbar progress on the Tao backend |
 | `nucleus.global-hotkey` | System-wide keyboard shortcuts |
 | `nucleus.energy-manager` | Energy efficiency & screen-awake APIs |
 | `nucleus.autolaunch` | Start the app at user login across all platforms |
+| `nucleus.scheduler` | OS-scheduled background tasks (Task Scheduler / launchd / systemd) |
+| `nucleus.scheduler-testing` | Test doubles for `scheduler` |
+| `nucleus.fs-watcher` | Native filesystem watcher |
+| `nucleus.service-management-macos` | macOS `SMAppService` — login items, launch agents, daemons |
 | `nucleus.native-ssl` | OS trust store integration |
 | `nucleus.native-http` | HTTP client with native SSL |
+| `nucleus.native-http-okhttp` | OkHttp engine on `native-http` |
+| `nucleus.native-http-ktor` | Ktor engine on `native-http` |
 | `nucleus.linux-hidpi` | Native HiDPI scale detection on Linux |
-| `nucleus.graalvm-runtime` | Native-image bootstrap, font fixes, automatic resource inclusion |
+| `nucleus.graalvm-runtime` | Native-image bootstrap, font fixes, automatic resource inclusion. Daemons/CLIs: `graalvm { headless = true }` to skip AWT/Skiko metadata and GUI `.so`/`.dll` copies |
 
 ## Documentation
 
@@ -199,8 +257,9 @@ Full documentation is available at
 ## Community
 
 Ask questions, report bugs, and share what you're building on
-[GitHub Discussions](https://github.com/NucleusFramework/Nucleus/discussions) and the
-[issue tracker](https://github.com/NucleusFramework/Nucleus/issues).
+[GitHub Discussions](https://github.com/NucleusFramework/Nucleus/discussions), the
+[issue tracker](https://github.com/NucleusFramework/Nucleus/issues), and
+[#nucleus](https://kotlinlang.slack.com/archives/C0BQYKHBGR0) on the Kotlin Slack.
 
 ## License
 
